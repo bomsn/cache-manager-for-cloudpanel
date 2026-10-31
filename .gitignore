@@ -1,0 +1,9 @@
+.claude/
+.codex/
+.env*
+*.log
+*.sqlite3*
+*.local.*
+*.pem
+*.key
+*.zip
