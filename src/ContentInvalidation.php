@@ -21,8 +21,8 @@ final class ContentInvalidation
         foreach (['added_post_meta', 'updated_post_meta', 'deleted_post_meta'] as $hook) {
             add_action($hook, [$this, 'metadata'], 20, 3);
         }
-        // Term meta (category icons, descriptions, ordering) is shown on archive and
-        // listing pages, and saving it alone fires no term hook.
+        // Term meta (a category's icon or description) appears on listing pages, and
+        // saving it fires no term hook of its own.
         foreach (['added_term_meta', 'updated_term_meta', 'deleted_term_meta'] as $hook) {
             add_action($hook, [$this, 'termMetadata'], 20, 0);
         }
@@ -49,8 +49,8 @@ final class ContentInvalidation
         if (in_array($post->post_type, ['revision', 'shop_order', 'shop_order_refund'], true)) {
             return;
         }
-        // This release uses one site revision, including archive and recommendation
-        // dependencies. Selective invalidation is deliberately not advertised.
+        // Archives, listings and recommendations can show any post, so a post
+        // change clears the whole site rather than guessing which pages show it.
         $this->all();
     }
 
@@ -79,9 +79,9 @@ final class ContentInvalidation
 
     /**
      * A visitor reading the site never changes content, but view counters and similar
-     * trackers write post metadata on every page view and on the cart refresh that
-     * follows it; clearing on those emptied the whole cache with each visit. Edits are
-     * sent (POST), or come from an admin screen, a scheduled task or the command line.
+     * trackers write metadata on every page view and on the cart refresh that follows
+     * it; clearing on those would empty the cache with each visit. Edits are sent
+     * (POST), or come from an admin screen, a scheduled task or the command line.
      * Product saves and stock changes also have their own hooks.
      */
     private static function pageView(): bool

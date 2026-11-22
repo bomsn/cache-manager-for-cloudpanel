@@ -4,10 +4,10 @@ namespace CacheManagerForCloudPanel;
 /**
  * Preferences saved from Settings > Cache.
  *
- * Server wiring (port, purge key, readiness file, origin lifetime) stays in
- * wp-config.php and is read by Configuration. This option holds only choices an
- * administrator may change at any time; the Cloudflare token is kept apart by the
- * Cloudflare layer so it is never autoloaded.
+ * Page cache server settings live with the server (wp-config.php for the
+ * Companion, CloudPanel's own settings file for its Varnish). This option holds
+ * only choices an administrator may change at any time; the Cloudflare token is
+ * kept apart by the Cloudflare layer so it is never autoloaded.
  */
 final class Settings
 {

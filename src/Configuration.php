@@ -4,21 +4,18 @@ namespace CacheManagerForCloudPanel;
 /**
  * This site's identity (host and origin) and the server that manages its page cache.
  *
- * The page cache is CloudPanel's own Varnish or the CloudPanel Companion's, never
- * both: a server runs one Varnish. The Companion comes first because installing it
- * replaces CloudPanel's Varnish on the server (its own varnishd on the same port,
- * with a policy that refuses CloudPanel's tag purges) and switches CloudPanel's
- * controller off for the site. CloudPanel's settings file can still say Varnish
- * is on afterwards, so it is only used when the Companion is not.
+ * A server runs one Varnish, so the first candidate that is present manages the
+ * site. The Companion comes first because installing it replaces CloudPanel's
+ * Varnish, while CloudPanel's settings can still say Varnish is on.
  */
 final class Configuration
 {
-    /** @var list<PageCacheServer> Candidates, the one that takes precedence first. */
+    /** @var list<PageCacheServer> */
     private array $candidates;
 
     /**
-     * @param list<PageCacheServer>|null $candidates Servers to choose from, in order
-     *        of precedence; null for the Companion, then CloudPanel's Varnish.
+     * @param list<PageCacheServer>|null $candidates In order of precedence; null for
+     *        the Companion, then CloudPanel's Varnish.
      */
     public function __construct(?array $candidates = null)
     {
@@ -37,13 +34,6 @@ final class Configuration
             }
         }
         return null;
-    }
-
-    /** The Companion when it manages the page cache, for the headers its server policy reads. */
-    public function companion(): ?CompanionServer
-    {
-        $server = $this->server();
-        return $server instanceof CompanionServer ? $server : null;
     }
 
     /** Whether this site has a page cache at all, whatever the state of its configuration. */

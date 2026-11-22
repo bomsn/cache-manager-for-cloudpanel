@@ -2,13 +2,11 @@
 namespace CacheManagerForCloudPanel;
 
 /**
- * The server page cache (Varnish), managed by CloudPanel's own Varnish or the
- * CloudPanel Companion (see Configuration).
+ * The server page cache (Varnish).
  *
- * Whole-site clears use the durable InvalidationQueue, exactly like automatic
- * invalidation, so a manual clear gets the same record-then-send and retry
- * guarantees. Single pages go straight to the server, which clears just the page
- * when it can.
+ * Whole-site clears go through the durable InvalidationQueue, like automatic
+ * invalidation, so a manual clear is recorded first and retried until the server
+ * confirms it. Single pages go straight to the server.
  */
 final class PageCache implements UrlLayer
 {
@@ -141,10 +139,8 @@ final class PageCache implements UrlLayer
     {
         $outcome = $this->configuration->server()->clearPage($url);
         if ($outcome === PageCacheServer::PAGE) {
-            // The Companion repeats each ban about a minute later, which catches a
-            // copy that was being fetched while the first ban ran.
             return Result::success($this->withWarmup(
-                __('Cleared this page. An old copy can take up to a minute to disappear.', 'cache-manager-for-cloudpanel'),
+                __('Cleared this page.', 'cache-manager-for-cloudpanel'),
                 $this->warmer->schedule([$url])
             ));
         }
@@ -154,8 +150,8 @@ final class PageCache implements UrlLayer
                 $this->warmer->schedule()
             ));
         }
-        // Any other answer leaves the page's freshness unknown. Fall back to the
-        // durable whole-site clear, which retries until the server confirms it.
+        // An unconfirmed page clear leaves the page possibly stale; the queued
+        // whole-site clear retries until it is confirmed.
         $site = $this->clear();
         if (!$site->ok()) {
             return $site;

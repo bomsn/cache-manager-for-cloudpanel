@@ -3,7 +3,7 @@ namespace CacheManagerForCloudPanel;
 
 /**
  * Durable whole-site invalidation: record first, send at the end of the request,
- * retry from WP-Cron until every page cache server confirms.
+ * retry from WP-Cron until the page cache server confirms.
  *
  * The table holds one row (tag "site"). Its revision rises with every recorded
  * change, so a confirmation only acknowledges the revision it was sent for.
@@ -11,7 +11,7 @@ namespace CacheManagerForCloudPanel;
 final class InvalidationQueue
 {
     public const RETRY_HOOK = 'cache_manager_for_cloudpanel_retry';
-    /** Set while a recorded change has not been confirmed by the cache service. */
+    /** Set while a recorded change has not been confirmed by the page cache server. */
     public const FAILURE_OPTION = 'cache_manager_for_cloudpanel_error';
     public const TABLE = 'cache_manager_for_cloudpanel_queue';
 
@@ -49,7 +49,7 @@ final class InvalidationQueue
         }
     }
 
-    /** Record a whole-site clear and send it now. True once the cache service has confirmed it. */
+    /** Record a whole-site clear and send it now. True once the page cache server has confirmed it. */
     public function clearNow(): bool
     {
         $this->enqueue();
@@ -94,7 +94,7 @@ final class InvalidationQueue
         $this->recorded = false;
     }
 
-    /** Recorded changes still waiting for the cache service to confirm them (0 or 1). */
+    /** Recorded changes still waiting for the page cache server to confirm them (0 or 1). */
     public function pending(): int
     {
         global $wpdb;

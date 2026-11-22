@@ -2,12 +2,10 @@
 namespace CacheManagerForCloudPanel;
 
 /**
- * A server that can manage this site's page cache.
+ * A Varnish setup that can manage this site's page cache.
  *
- * CloudPanel's own Varnish and the CloudPanel Companion's cache service are the
- * two implementations. Configuration picks the one that manages the site, so
- * adding a server is one new class and one entry in Configuration, not a branch
- * in each caller.
+ * Callers depend on this interface only, so supporting another setup is one new
+ * class and one entry in Configuration's candidates.
  */
 interface PageCacheServer
 {

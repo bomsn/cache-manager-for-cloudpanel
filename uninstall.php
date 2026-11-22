@@ -4,10 +4,9 @@
  * invalidation queue table and any scheduled events.
  *
  * The plugin's classes are not loaded during uninstall, so the names are spelled
- * out here; they match the constants in src/. The wp-config.php constants belong
- * to the server setup and are left for the operator (see "Disabling or retiring"
- * in the CloudPanel Companion's guide). Result notices are 60-second transients
- * that expire on their own.
+ * out here; they match the constants in src/. Server settings (wp-config.php
+ * constants, CloudPanel's Varnish settings) belong to the server and are left
+ * as they are. Result notices are 60-second transients that expire on their own.
  */
 if (!defined('WP_UNINSTALL_PLUGIN')) {
     exit;

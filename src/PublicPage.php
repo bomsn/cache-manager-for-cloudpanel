@@ -2,9 +2,8 @@
 namespace CacheManagerForCloudPanel;
 
 /**
- * Marks pages the Companion's server policy may cache. The headers here are that
- * policy's contract, so this does nothing unless the site uses the Companion;
- * CloudPanel's own Varnish controller sends its own caching headers.
+ * Marks the pages the Companion's cache policy may store. Only that policy reads
+ * these headers, so nothing is sent while another server manages the page cache.
  */
 final class PublicPage
 {
@@ -17,13 +16,13 @@ final class PublicPage
 
     public function prepare(): void
     {
-        $companion = $this->configuration->companion();
-        if ($companion === null || !$this->configuration->enabled()) {
+        $companion = $this->configuration->server();
+        if (!$companion instanceof CompanionServer || !$this->configuration->enabled()) {
             return;
         }
         if (!$companion->available()) {
-            // Service failure must also stop an upstream cache from storing
-            // newly rendered pages while local invalidation is unavailable.
+            // While the service is down, pages cannot be invalidated, so upstream
+            // caches such as Cloudflare must not store them either.
             if (!headers_sent()) {
                 header('Cache-Control: private, no-store', true);
             }

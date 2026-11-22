@@ -2,17 +2,15 @@
 namespace CacheManagerForCloudPanel;
 
 /**
- * The CloudPanel Companion's local cache service: the wiring in wp-config.php,
- * the service's readiness, and the one request shape it accepts. Every request
- * to the service is built here, so the contract with the Companion has a single
- * owner.
+ * The CloudPanel Companion's local cache service: its settings in wp-config.php,
+ * its readiness, and the requests it accepts.
  */
 final class CompanionServer implements PageCacheServer
 {
     /**
-     * Seconds Varnish keeps an approved public page (CACHE_MANAGER_FOR_CLOUDPANEL_ORIGIN_TTL).
-     * Every edit invalidates the whole site, so the server copy can live much longer
-     * than the 300-second lifetime Cloudflare and browsers are given, which stays fixed.
+     * Seconds Varnish keeps a public page (CACHE_MANAGER_FOR_CLOUDPANEL_ORIGIN_TTL).
+     * Edits clear the whole site, so this can far exceed the fixed 300 seconds
+     * Cloudflare and browsers may keep a page.
      */
     public const ORIGIN_TTL_DEFAULT = 3600;
     public const ORIGIN_TTL_MINIMUM = 300;
@@ -35,7 +33,7 @@ final class CompanionServer implements PageCacheServer
         return __('CloudPanel Companion', 'cache-manager-for-cloudpanel');
     }
 
-    /** Whether wp-config.php asks for the Companion's page cache, whatever the rest of its wiring. */
+    /** Whether wp-config.php switches the Companion on, even if its other settings are invalid. */
     public function present(): bool
     {
         return defined('CACHE_MANAGER_FOR_CLOUDPANEL_ENABLED') && CACHE_MANAGER_FOR_CLOUDPANEL_ENABLED === true;
@@ -92,21 +90,17 @@ final class CompanionServer implements PageCacheServer
         }
         $response = $this->request('PURGE', ['X-Cache-Manager-For-CloudPanel-Url' => $target]);
         return match (self::policy($response)) {
-            // The service repeats each ban about a minute later, which catches a
-            // copy that was being fetched while the first ban ran.
             self::URL_POLICY => self::PAGE,
-            // Older services ignore the URL and start a new site revision; newer ones
-            // do the same when a ban is refused or too many are waiting.
+            // The service clears the whole site when it cannot ban a single page.
             self::SITE_POLICY => self::SITE,
             default => self::describe($response),
         };
     }
 
     /**
-     * Check the purge key and the path to Varnish with the service's OPTIONS
-     * check, which never clears anything. 200 names the policy a clear would
-     * apply; 403 is a wrong key or unknown host, 503 an unreachable Varnish, and
-     * 501 a Companion that predates the check.
+     * The service's OPTIONS check, which clears nothing: 200 names the policy a
+     * clear would apply, 403 is a wrong key or unknown host, 503 an unreachable
+     * Varnish, and 501 a service without the check.
      */
     public function test(): Result
     {
@@ -129,10 +123,9 @@ final class CompanionServer implements PageCacheServer
     }
 
     /**
-     * The path and query to ban, as visitors request it: percent-encoded and
-     * without campaign parameters, which the server policy strips before lookup.
-     * The value travels in a request header, so anything outside printable ASCII
-     * is encoded or rejected here rather than by the service.
+     * The path and query to ban, as the cache stores it: without the campaign
+     * parameters the policy strips before lookup, and percent-encoded because it
+     * travels in a request header that must stay printable ASCII.
      */
     public static function requestTarget(string $url, string $host): string|\WP_Error
     {
@@ -157,7 +150,7 @@ final class CompanionServer implements PageCacheServer
         return $target;
     }
 
-    /** What a successful purge cleared, or a check says a clear would (URL_POLICY or SITE_POLICY); '' otherwise. */
+    /** URL_POLICY or SITE_POLICY from a confirmed purge or check; '' otherwise. */
     private static function policy(array|\WP_Error $response): string
     {
         if (is_wp_error($response) || (int) wp_remote_retrieve_response_code($response) !== 200) {

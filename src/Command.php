@@ -49,8 +49,8 @@ final class Command
         foreach ($report->entries() as $entry) {
             \WP_CLI::log(sprintf('%s: %s%s', $entry['label'], $prefixes[$entry['status']] ?? '', $entry['message']));
         }
-        // The Companion's deploy scripts rely on a non-zero exit when the page cache
-        // was not cleared, including when the integration is off.
+        // Deploy scripts rely on a non-zero exit whenever the page cache was not
+        // cleared, including when it is off.
         if ($report->failed()) {
             \WP_CLI::error('Not every cache was cleared.');
         }

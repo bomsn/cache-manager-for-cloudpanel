@@ -2,30 +2,28 @@
 namespace CacheManagerForCloudPanel;
 
 /**
- * CloudPanel's own Varnish cache, switched on in the site's Varnish Cache tab.
+ * CloudPanel's Varnish Cache, switched on in the site's Varnish Cache tab.
  *
- * CloudPanel writes the site's settings to ~/.varnish-cache/settings.json and
- * loads a controller that tags every cached page with the site's tag prefix
- * ("96b1") and its posts ("96b1-post-12"). This class reads that same file, not
- * the controller's $clpVarnish global, because the controller is only loaded for
- * web requests: WP-CLI and system cron would otherwise never clear the cache.
+ * CloudPanel tags each cached page with the site's prefix ("96b1") and the posts
+ * it shows ("96b1-post-12"), and bans every page whose tags match the
+ * X-Cache-Tags header of a PURGE request.
  *
- * Clears use the request CloudPanel's controller sends: PURGE to the configured
- * server with an X-Cache-Tags header, which CloudPanel's VCL turns into a ban on
- * every object whose tags match.
+ * Settings are read from ~/.varnish-cache/settings.json, not from CloudPanel's
+ * $clpVarnish global, because the global exists only in web requests and WP-CLI
+ * and cron must be able to clear the cache too.
  */
 final class CloudPanelVarnish implements PageCacheServer
 {
-    /** Matches no page, so a connection test clears nothing. */
+    /** A tag no page carries, so a connection test clears nothing. */
     private const TEST_TAG_SUFFIX = '-cache-manager-for-cloudpanel-test';
 
-    /** @var array<string, mixed>|null Parsed settings; null until first read. */
+    /** @var array<string, mixed>|null Null until first read. */
     private ?array $settings = null;
     private string $readError = '';
 
     /**
      * @param string      $host         This site's host name.
-     * @param string|null $settingsFile Path to CloudPanel's settings.json; null for the site user's ~/.varnish-cache/settings.json.
+     * @param string|null $settingsFile Null for ~/.varnish-cache/settings.json.
      */
     public function __construct(private string $host, private ?string $settingsFile = null) {}
 
@@ -35,10 +33,9 @@ final class CloudPanelVarnish implements PageCacheServer
     }
 
     /**
-     * Present when CloudPanel has written settings for this site and Varnish is
-     * switched on in them. A settings file that exists but cannot be read still
-     * counts as present, so the problem is reported instead of the page cache
-     * silently looking switched off while Varnish keeps serving old pages.
+     * Present when the settings switch Varnish on. An unreadable settings file also
+     * counts, so its error is shown rather than the cache appearing switched off
+     * while Varnish keeps serving pages.
      */
     public function present(): bool
     {
@@ -60,7 +57,7 @@ final class CloudPanelVarnish implements PageCacheServer
         return '';
     }
 
-    /** CloudPanel serves pages from Varnish directly; there is no separate service to wait for. */
+    /** Varnish serves pages directly, with no separate service to wait for. */
     public function available(): bool
     {
         return true;
@@ -77,10 +74,10 @@ final class CloudPanelVarnish implements PageCacheServer
     }
 
     /**
-     * Pages are tagged by post, not by address, so a page that shows a post is
-     * cleared through that post's tag. CloudPanel's ban matches tags as a regular
-     * expression, so the tag for post 2 also clears post 23's pages: a few extra
-     * pages refill, none is left stale. Any other address clears the whole site.
+     * Pages are tagged by post, not by address, so a page showing a post is cleared
+     * through that post's tag, and any other address clears the whole site. Tags
+     * match as a regular expression, so post 2's tag also clears post 23's pages;
+     * that only refills a few extra pages.
      */
     public function clearPage(string $url): string
     {
@@ -122,7 +119,6 @@ final class CloudPanelVarnish implements PageCacheServer
         $code = (int) wp_remote_retrieve_response_code($response);
         return match ($code) {
             200 => '',
-            // CloudPanel's VCL answers 405 to a PURGE from an address outside its "purger" list.
             405 => __('CloudPanel\'s Varnish refused the purge: this server\'s address is not allowed to purge (HTTP 405).', 'cache-manager-for-cloudpanel'),
             default => sprintf(
                 /* translators: %d: HTTP status code */
@@ -132,24 +128,21 @@ final class CloudPanelVarnish implements PageCacheServer
         };
     }
 
-    /** "http://127.0.0.1:6081/" from the configured "127.0.0.1:6081", or '' when it is not a host and port. */
+    /** "http://127.0.0.1:6081/" for the server "127.0.0.1:6081"; '' unless it is a host and port. */
     private function endpoint(): string
     {
         $server = (string) ($this->settings()['server'] ?? '');
         return preg_match('/^(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\]):[0-9]{1,5}$/D', $server) ? 'http://' . $server . '/' : '';
     }
 
-    /**
-     * The site's cache tag prefix. It is sent as a regular expression, so only
-     * the plain characters CloudPanel generates are accepted.
-     */
+    /** The site's tag prefix. It is sent as a regular expression, so only plain characters are accepted. */
     private function prefix(): string
     {
         $prefix = (string) ($this->settings()['cacheTagPrefix'] ?? '');
         return preg_match('/^[A-Za-z0-9_-]+$/D', $prefix) ? $prefix : '';
     }
 
-    /** @return array<string, mixed> CloudPanel's settings for this site; empty when it has none. */
+    /** @return array<string, mixed> Empty when the site has no settings file. */
     private function settings(): array
     {
         if ($this->settings !== null) {
@@ -174,7 +167,7 @@ final class CloudPanelVarnish implements PageCacheServer
         return $this->settings;
     }
 
-    /** ~/.varnish-cache/settings.json of the user PHP runs as, which on CloudPanel is the site user. */
+    /** CloudPanel runs PHP as the site user, whose home holds the settings. */
     private static function defaultSettingsFile(): string
     {
         $home = '';

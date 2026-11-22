@@ -178,9 +178,9 @@ namespace {
     }
 
     /**
-     * The page cache candidates the checks run against, in production's order: by
-     * default the Companion (switched on by the constants above), then CloudPanel's
-     * Varnish without a settings file, so results never depend on the machine running them.
+     * Configuration with the default candidate order. CloudPanel's settings file is
+     * a path that does not exist unless given, so results never depend on the
+     * machine running the checks.
      *
      * @param list<P\PageCacheServer>|null $servers
      */
@@ -192,7 +192,7 @@ namespace {
         ]);
     }
 
-    /** CloudPanel's Varnish, reading settings written to a temporary settings.json. */
+    /** CloudPanel's Varnish with the given settings file contents. */
     function cloudpanel(array|string $settings): P\CloudPanelVarnish
     {
         $file = tempnam(sys_get_temp_dir(), 'cmcp');
@@ -298,7 +298,7 @@ namespace {
         check($result->status === P\Result::ERROR && str_contains($result->message, $expected), $label);
     }
 
-    // CloudPanel's own Varnish, without the Companion: read from its settings.json.
+    // CloudPanel's Varnish Cache.
     reset_state();
     [$layers, $page] = build([cloudpanel(CLOUDPANEL_SETTINGS)]);
     $GLOBALS['test']['responses'] = [respond(200)];
@@ -355,8 +355,7 @@ namespace {
     check(!configuration([new P\CloudPanelVarnish($host, __DIR__ . '/fixtures/no-such-settings.json')])->switchedOn(),
         'a site without CloudPanel settings has no CloudPanel page cache');
 
-    // A Companion site whose CloudPanel settings still say Varnish is on: installing the
-    // Companion replaced CloudPanel's Varnish, so the Companion alone manages the cache.
+    // The Companion takes precedence over CloudPanel settings that still switch Varnish on.
     $companionSite = static fn (): array => [new P\CompanionServer('shop.example.com'), cloudpanel(CLOUDPANEL_SETTINGS)];
     reset_state();
     [, $page] = build($companionSite());
