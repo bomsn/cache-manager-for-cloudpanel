@@ -73,7 +73,7 @@ final class PageCache implements UrlLayer
                 ? __('A page cache clear failed. It is queued and retries automatically.', 'cache-manager-for-cloudpanel')
                 : __('A content change could not be recorded for the page cache. Clear the page cache once the database has recovered.', 'cache-manager-for-cloudpanel');
         }
-        return '';
+        return $this->configuration->server()->conflict();
     }
 
     public function status(): array

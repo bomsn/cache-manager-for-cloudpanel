@@ -307,8 +307,8 @@ namespace {
     check($result->ok() && $GLOBALS['wpdb']->row === null && count($GLOBALS['test']['requests']) === 1,
         "CloudPanel's Varnish alone runs the page cache and confirms a whole-site clear");
     check($sent['url'] === 'http://127.0.0.1:6081/' && $sent['method'] === 'PURGE'
-        && $sent['headers'] === ['Host' => $host, 'X-Cache-Tags' => '96b1'],
-        "a whole-site clear sends CloudPanel's own request: PURGE to its server with the site's tag prefix");
+        && $sent['headers'] === ['Host' => $host, 'X-Cache-Tags' => '(^|,)96b1(,|$)'],
+        "a whole-site clear sends CloudPanel's own request: PURGE to its server with the site's tag prefix, anchored");
     $status = $page->status();
     check($status['tone'] === 'good' && $status['details']['Cache server'] === 'CloudPanel Varnish' && $layers->overview([
         'page_cache' => $status])['tone'] === 'good', 'the status card names CloudPanel Varnish and reads as ready');
@@ -327,18 +327,43 @@ namespace {
     $single = $page->clearUrl('https://shop.example.com/a-post/');
     $other = $page->clearUrl('https://shop.example.com/category/news/');
     [$postPurge, $sitePurge] = $GLOBALS['test']['requests'];
-    check($single->ok() && str_contains($single->message, 'Cleared this page') && $postPurge['headers']['X-Cache-Tags'] === '96b1-post-12',
+    check($single->ok() && str_contains($single->message, 'Cleared this page') && $postPurge['headers']['X-Cache-Tags'] === '(^|,)96b1-post-12(,|$)',
         "a page that shows a post is cleared through the post's tag");
-    check($other->ok() && str_contains($other->message, 'whole site') && $sitePurge['headers']['X-Cache-Tags'] === '96b1',
+    check($other->ok() && str_contains($other->message, 'whole site') && $sitePurge['headers']['X-Cache-Tags'] === '(^|,)96b1(,|$)',
         'any other address clears the whole site');
+
+    // CloudPanel's VCL runs the X-Cache-Tags value as a regular expression over each
+    // page's stored list, which its controller joins with commas.
+    $bans = static fn (string $tag, string $stored): bool => preg_match('/' . P\CloudPanelVarnish::pattern($tag) . '/', $stored) === 1;
+    check($bans('96b1-post-2', '96b1,96b1-post-2') && $bans('96b1-post-2', '96b1-post-2,96b1-post-7') && $bans('96b1-post-2', '96b1,96b1-post-9,96b1-post-2'),
+        "a post's tag matches it first, last or in the middle of a page's tag list");
+    check(!$bans('96b1-post-2', '96b1,96b1-post-23') && !$bans('96b1-post-2', '96b1,x96b1-post-2'),
+        "post 2's tag does not match post 23's pages, nor a tag that merely contains it");
+    check($bans('96b1', '96b1,96b1-post-12') && !$bans('2345', 'e96b,e96b-post-12345') && !$bans('96b1', '96b10,96b10-post-4'),
+        "the site's prefix matches its own pages only, never another site's tags that contain it");
 
     reset_state();
     [, $page] = build([cloudpanel(CLOUDPANEL_SETTINGS)]);
-    $GLOBALS['test']['responses'] = [respond(200)];
+    $GLOBALS['test']['responses'] = [respond(200), respond(200, ['x-cache-tags' => '96b1,96b1-post-7'])];
     $result = $page->test();
-    check($result->ok() && str_contains($result->message, 'Nothing was cleared')
-        && $GLOBALS['test']['requests'][0]['headers']['X-Cache-Tags'] === '96b1-cache-manager-for-cloudpanel-test'
-        && $GLOBALS['wpdb']->row === null, 'the connection test purges a tag no page carries');
+    [$probe, $home] = $GLOBALS['test']['requests'];
+    check($result->ok() && str_contains($result->message, 'Nothing was cleared') && $GLOBALS['wpdb']->row === null && !$GLOBALS['test']['events']
+        && $probe['method'] === 'PURGE' && $probe['headers']['X-Cache-Tags'] === '(^|,)96b1-cache-manager-for-cloudpanel-test(,|$)',
+        'the connection test purges a tag no page carries, and records no clear');
+    check($home['method'] === 'GET' && $home['url'] === 'http://127.0.0.1:6081/' && $home['headers'] === ['Host' => $host],
+        'the connection test then loads the home page through Varnish');
+    $answers = [
+        'a home page without the site\'s tag fails the test' => [respond(200, ['x-cache-tags' => 'x96b1,96b1-post-7']), 'without this site\'s cache tag'],
+        'a home page that cannot be loaded fails the test with its cause' => [new WP_Error('http', 'timed out'), 'timed out'],
+    ];
+    foreach ($answers as $label => [$response, $expected]) {
+        $GLOBALS['test']['responses'] = [respond(200), $response];
+        $result = $page->test();
+        check($result->status === P\Result::ERROR && str_contains($result->message, $expected), $label);
+    }
+    $GLOBALS['test']['responses'] = [respond(405)];
+    $GLOBALS['test']['requests'] = [];
+    check(!$page->test()->ok() && count($GLOBALS['test']['requests']) === 1, 'a refused purge fails the test before the home page is loaded');
 
     reset_state();
     $settings = [
@@ -370,6 +395,29 @@ namespace {
         'the connection test checks only the Companion');
     check(configuration([new P\CompanionServer('shop.example.com'), cloudpanel(['cacheTagPrefix' => ''] + CLOUDPANEL_SETTINGS)])->error() === '',
         "CloudPanel's leftover settings cannot put a Companion site's page cache in error");
+    check(configuration($companionSite())->server() instanceof P\CompanionServer
+        && configuration([cloudpanel(CLOUDPANEL_SETTINGS)])->server() instanceof P\CloudPanelVarnish,
+        "the Companion's settings win over CloudPanel's; CloudPanel's alone select CloudPanel's Varnish");
+
+    // Detection runs once per Configuration, however often its state is read.
+    $counted = new class implements P\PageCacheServer {
+        public int $checks = 0;
+        public function label(): string { return 'Counted'; }
+        public function present(): bool { $this->checks++; return true; }
+        public function error(): string { return ''; }
+        public function available(): bool { return true; }
+        public function ttl(): int { return 0; }
+        public function clearSite(): bool { return true; }
+        public function clearPage(string $url): string { return self::PAGE; }
+        public function test(): P\Result { return P\Result::success(''); }
+        public function conflict(): string { return ''; }
+    };
+    $configuration = configuration([$counted]);
+    $configuration->switchedOn();
+    $configuration->enabled();
+    $configuration->available();
+    $configuration->clearSite();
+    check($configuration->server() === $counted && $counted->checks === 1, 'the page cache server is detected once per Configuration');
 
     // Cloudflare.
     check(P\Cloudflare::zoneCandidates('shop.example.co.uk') === ['shop.example.co.uk', 'example.co.uk', 'co.uk'], 'zone candidates run from most specific to two labels');
@@ -708,6 +756,19 @@ namespace {
         $returned = P\Actions::returnUrl($from);
         check($returned === $expected, $label . ($returned === $expected ? '' : " (got $returned)"));
     }
+
+    // CloudPanel's CLP Varnish Cache plugin clears the same cache: the owner is told to
+    // switch it off, with the reason that fits the server. Last, as a constant stays defined.
+    reset_state();
+    [, $standalone] = build([cloudpanel(CLOUDPANEL_SETTINGS)]);
+    check($standalone->attention() === '' && $standalone->status()['state'] === 'Ready', 'without CLP Varnish Cache, CloudPanel\'s Varnish reads as ready');
+    define('CLP_VARNISH_VERSION', '1.1.1');
+    $status = $standalone->status();
+    check(str_contains($standalone->attention(), 'CLP Varnish Cache plugin is also active') && str_contains($standalone->attention(), 'deactivate it')
+        && $status['state'] === 'Needs attention' && str_contains($status['details']['Problem'] ?? '', 'second menu'),
+        'with CloudPanel\'s Varnish, an active CLP Varnish Cache plugin is reported as a duplicate to deactivate');
+    check(str_contains((new P\CompanionServer('shop.example.com'))->conflict(), 'works only with CloudPanel\'s own Varnish Cache'),
+        'with the Companion, an active CLP Varnish Cache plugin is reported as unable to clear anything');
 
     // Uninstall removes every option, scheduled hook and table the plugin names,
     // a check rather than a reminder because the names are spelled out twice.

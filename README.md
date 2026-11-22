@@ -20,6 +20,17 @@ The page cache works with either of two Varnish setups:
 
 A server runs one Varnish, so a site uses one of these. Installing the Companion replaces CloudPanel's Varnish on the server, so when the Companion is set up for a site the plugin uses it, even if CloudPanel still shows Varnish Cache as switched on. With neither, the plugin still clears Cloudflare, the object cache and WordPress's own caches, and the page cache simply shows as **Off**.
 
+### With CloudPanel's Varnish Cache
+
+When Varnish Cache is switched on for a site, CloudPanel runs a small script of its own before WordPress on every page. It decides which pages Varnish may keep and labels each one with the site's cache tag and the posts it shows. The plugin clears pages by those labels:
+
+- It matches whole labels only, so it never clears another site on the same server, and clearing post 2 never clears post 23.
+- **Clear this page** on a page that shows one post clears that page and the listings that show the post. On any other page (the shop, a category, the posts page) it clears the whole site, because those pages are labelled with the posts they list.
+- When you save a post in the editor, CloudPanel's script also clears that post's pages. The plugin then clears the whole site, so the home page, listings and menus show the change too. Both can stay on.
+- **Test connections** also loads your home page through Varnish to check it carries the site's cache tag. If it doesn't, CloudPanel's script is not running for the site, and clearing from WordPress would not reach the cached pages.
+
+You don't need CloudPanel's **CLP Varnish Cache** plugin. If it is active, the page cache card asks you to deactivate it: it adds a second Cache menu and clears the same cache again. How long pages are kept and which pages are never cached stay in the site's **Varnish Cache** tab in CloudPanel. With the Companion, that plugin cannot clear anything at all.
+
 ## Requirements
 
 - WordPress 6.2 or later and PHP 8.1 or later, on a single site (multisite is not supported).
@@ -55,7 +66,7 @@ Answer **yes** when it asks about the page cache and confirm the plugin folder (
 The top of the screen tells you whether every cache is ready or which one needs attention, with two buttons:
 
 - **Clear all caches** clears every cache you chose in the settings (all of them by default).
-- **Test connections** checks that the page cache accepts purges from your site (CloudPanel's Varnish takes a purge that matches no page; the Companion's service checks your site's purge key and that it can reach Varnish), and that Cloudflare accepts the sign-in and can find your zone. It never clears any page.
+- **Test connections** checks that the page cache accepts purges from your site (CloudPanel's Varnish takes a purge that matches no page and serves your home page with the site's cache tag; the Companion's service checks your site's purge key and that it can reach Varnish), and that Cloudflare accepts the sign-in and can find your zone. It never clears any page.
 
 Below that, each cache has a card with its status, the details that matter (how long pages are kept, the last warm-up, the Cloudflare zone, the object cache provider), when it was last cleared and its own button.
 
@@ -76,7 +87,7 @@ Administrators get a **Cache** menu in the admin bar, both on the site and in th
 - One item per cache the site has: **Clear page cache**, **Purge Cloudflare cache**, **Flush object cache**, **Clean expired transients** and, with Elementor, **Regenerate Elementor CSS**.
 - **Settings** opens Settings > Cache.
 
-An amber dot next to **Cache** means the page cache needs attention: its settings in `wp-config.php` are invalid, its service is down (pages are served uncached until it recovers), or a clear failed. The reason is shown at the top of the menu.
+An amber dot next to **Cache** means the page cache needs attention: its settings in `wp-config.php` are invalid, its service is down (pages are served uncached until it recovers), a clear failed, or another plugin clears the same cache. The reason is shown at the top of the menu.
 
 After every action, a short notice lists each cache and what happened to it: cleared, skipped (with the reason) or failed (with the reason).
 

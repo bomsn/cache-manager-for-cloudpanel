@@ -12,6 +12,8 @@ final class Configuration
 {
     /** @var list<PageCacheServer> */
     private array $candidates;
+    private ?PageCacheServer $server = null;
+    private bool $detected = false;
 
     /**
      * @param list<PageCacheServer>|null $candidates In order of precedence; null for
@@ -25,15 +27,22 @@ final class Configuration
         ];
     }
 
-    /** The server that manages this site's page cache, or null when it has none. */
+    /**
+     * The server that manages this site's page cache, or null when it has none.
+     * Detected on first use and kept, so the settings are read only once.
+     */
     public function server(): ?PageCacheServer
     {
-        foreach ($this->candidates as $server) {
-            if ($server->present()) {
-                return $server;
+        if (!$this->detected) {
+            $this->detected = true;
+            foreach ($this->candidates as $server) {
+                if ($server->present()) {
+                    $this->server = $server;
+                    break;
+                }
             }
         }
-        return null;
+        return $this->server;
     }
 
     /** Whether this site has a page cache at all, whatever the state of its configuration. */

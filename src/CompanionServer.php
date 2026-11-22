@@ -122,6 +122,13 @@ final class CompanionServer implements PageCacheServer
         });
     }
 
+    public function conflict(): string
+    {
+        return defined(self::CLP_VARNISH_CACHE)
+            ? __('The CLP Varnish Cache plugin is active, but it works only with CloudPanel\'s own Varnish Cache, which the CloudPanel Companion replaces on this server. Its menu cannot clear anything here, so deactivate it.', 'cache-manager-for-cloudpanel')
+            : '';
+    }
+
     /**
      * The path and query to ban, as the cache stores it: without the campaign
      * parameters the policy strips before lookup, and percent-encoded because it

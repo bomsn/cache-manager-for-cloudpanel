@@ -4,9 +4,10 @@ namespace CacheManagerForCloudPanel;
 /**
  * CloudPanel's Varnish Cache, switched on in the site's Varnish Cache tab.
  *
- * CloudPanel tags each cached page with the site's prefix ("96b1") and the posts
- * it shows ("96b1-post-12"), and bans every page whose tags match the
- * X-Cache-Tags header of a PURGE request.
+ * CloudPanel's controller (~/.varnish-cache/controller.php, which CloudPanel's
+ * PHP settings load before WordPress) tags each cacheable page with the site's
+ * prefix and the posts it shows ("96b1,96b1-post-12"), and CloudPanel's VCL bans
+ * every page whose tags match the X-Cache-Tags header of a PURGE request.
  *
  * Settings are read from ~/.varnish-cache/settings.json, not from CloudPanel's
  * $clpVarnish global, because the global exists only in web requests and WP-CLI
@@ -74,10 +75,11 @@ final class CloudPanelVarnish implements PageCacheServer
     }
 
     /**
-     * Pages are tagged by post, not by address, so a page showing a post is cleared
-     * through that post's tag, and any other address clears the whole site. Tags
-     * match as a regular expression, so post 2's tag also clears post 23's pages;
-     * that only refills a few extra pages.
+     * Pages are tagged with the posts they show, not by address. url_to_postid()
+     * names a post only for an address that shows that one post, so its tag clears
+     * the page together with the listings that show the post. Any other address,
+     * such as a shop or a category, lists posts under their own tags and clears
+     * the whole site.
      */
     public function clearPage(string $url): string
     {
@@ -90,16 +92,48 @@ final class CloudPanelVarnish implements PageCacheServer
         return $error === '' ? self::SITE : $error;
     }
 
+    /**
+     * A purge that matches no page, then the home page as Varnish serves it: every
+     * clear depends on CloudPanel's controller tagging the pages, and a page cached
+     * without the site's tag would never be cleared.
+     */
     public function test(): Result
     {
         $error = $this->purge($this->prefix() . self::TEST_TAG_SUFFIX);
-        return $error === ''
-            ? Result::success(__('CloudPanel\'s Varnish accepted a purge from this site. Nothing was cleared.', 'cache-manager-for-cloudpanel'))
-            : Result::error($error);
+        if ($error !== '') {
+            return Result::error($error);
+        }
+        $home = wp_remote_request($this->endpoint() . ltrim((string) wp_parse_url(home_url('/'), PHP_URL_PATH), '/'), [
+            'method' => 'GET', 'timeout' => 10, 'redirection' => 0, 'headers' => ['Host' => $this->host],
+        ]);
+        if (is_wp_error($home)) {
+            return Result::error(sprintf(
+                /* translators: %s: connection error */
+                __('CloudPanel\'s Varnish accepted a purge, but the home page could not be loaded through it: %s', 'cache-manager-for-cloudpanel'),
+                $home->get_error_message()
+            ));
+        }
+        $tags = explode(',', (string) wp_remote_retrieve_header($home, 'x-cache-tags'));
+        if (!in_array($this->prefix(), $tags, true)) {
+            return Result::error(__('CloudPanel\'s Varnish accepted a purge, but the home page comes back without this site\'s cache tag, so clears would not reach cached pages. CloudPanel adds the tag while Varnish Cache is switched on for the site: switch it off and on again in the site\'s Varnish Cache tab, or ask the server operator to check the site\'s PHP settings.', 'cache-manager-for-cloudpanel'));
+        }
+        return Result::success(__('CloudPanel\'s Varnish accepted a purge from this site, and its pages carry the site\'s cache tag. Nothing was cleared.', 'cache-manager-for-cloudpanel'));
+    }
+
+    public function conflict(): string
+    {
+        return defined(self::CLP_VARNISH_CACHE)
+            ? __('The CLP Varnish Cache plugin is also active. It clears the same cache and adds a second menu, so deactivate it: this plugin already clears the page cache whenever you edit content. How long pages are kept and which pages are never cached can still be changed in the site\'s Varnish Cache tab in CloudPanel.', 'cache-manager-for-cloudpanel')
+            : '';
     }
 
     /**
-     * Ban every cached object whose tags match $tag.
+     * Ban every cached page that carries $tag.
+     *
+     * CloudPanel's VCL matches the header as a regular expression against each
+     * page's tag list, so the tag is anchored to one whole entry of that list.
+     * Unanchored, post 2's tag would also clear post 23's pages, and the site's
+     * prefix would clear another site's pages whose tags merely contain it.
      *
      * @return string '' once Varnish confirmed the ban; otherwise why it failed.
      */
@@ -107,7 +141,7 @@ final class CloudPanelVarnish implements PageCacheServer
     {
         $response = wp_remote_request($this->endpoint(), [
             'method' => 'PURGE', 'timeout' => 2, 'redirection' => 0,
-            'headers' => ['Host' => $this->host, 'X-Cache-Tags' => $tag],
+            'headers' => ['Host' => $this->host, 'X-Cache-Tags' => self::pattern($tag)],
         ]);
         if (is_wp_error($response)) {
             return sprintf(
@@ -128,6 +162,16 @@ final class CloudPanelVarnish implements PageCacheServer
         };
     }
 
+    /**
+     * The X-Cache-Tags value that matches $tag only as a whole entry of a page's
+     * comma-separated tag list. Tags are built from prefix() and post IDs, whose
+     * characters are all literal in a regular expression.
+     */
+    public static function pattern(string $tag): string
+    {
+        return '(^|,)' . $tag . '(,|$)';
+    }
+
     /** "http://127.0.0.1:6081/" for the server "127.0.0.1:6081"; '' unless it is a host and port. */
     private function endpoint(): string
     {
@@ -135,7 +179,7 @@ final class CloudPanelVarnish implements PageCacheServer
         return preg_match('/^(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\]):[0-9]{1,5}$/D', $server) ? 'http://' . $server . '/' : '';
     }
 
-    /** The site's tag prefix. It is sent as a regular expression, so only plain characters are accepted. */
+    /** The site's tag prefix. Tags are sent in a regular expression, so only literal characters are accepted. */
     private function prefix(): string
     {
         $prefix = (string) ($this->settings()['cacheTagPrefix'] ?? '');
