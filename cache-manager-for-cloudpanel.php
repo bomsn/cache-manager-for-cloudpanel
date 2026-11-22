@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Cache Manager for CloudPanel
- * Description: A Varnish page cache that clears itself when you edit content, and one place to clear the page cache, Cloudflare and the object cache on CloudPanel sites.
- * Version: 0.4.4
+ * Description: Clears the Varnish page cache (CloudPanel's own, the CloudPanel Companion's, or both) whenever you edit content, and gives one place to clear the page cache, Cloudflare and the object cache on CloudPanel sites.
+ * Version: 0.5.0
  * Author: Ali Khallad
  * Update URI: https://github.com/bomsn/cache-manager-for-cloudpanel
  * Requires at least: 6.2
@@ -17,7 +17,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-const VERSION = '0.4.4';
+const VERSION = '0.5.0';
 const PLUGIN_FILE = __FILE__;
 
 spl_autoload_register(static function (string $class): void {

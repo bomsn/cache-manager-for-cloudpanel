@@ -21,6 +21,11 @@ final class ContentInvalidation
         foreach (['added_post_meta', 'updated_post_meta', 'deleted_post_meta'] as $hook) {
             add_action($hook, [$this, 'metadata'], 20, 3);
         }
+        // Term meta (category icons, descriptions, ordering) is shown on archive and
+        // listing pages, and saving it alone fires no term hook.
+        foreach (['added_term_meta', 'updated_term_meta', 'deleted_term_meta'] as $hook) {
+            add_action($hook, [$this, 'termMetadata'], 20, 0);
+        }
         add_action('updated_option', [$this, 'option'], 20, 1);
         foreach (['created_term', 'edited_term', 'delete_term'] as $hook) {
             add_action($hook, [$this, 'all'], 20, 0);
@@ -34,7 +39,7 @@ final class ContentInvalidation
             add_action($hook, [$this, 'all'], 20, 0);
         }
         // Public action for site code whose changes this plugin cannot detect itself
-        // (custom term meta, option pages, recommendation settings):
+        // (option pages, recommendation settings, data in custom tables):
         // do_action('cache_manager_for_cloudpanel_purge');
         add_action('cache_manager_for_cloudpanel_purge', [$this, 'all'], 10, 0);
     }
@@ -63,6 +68,13 @@ final class ContentInvalidation
             return;
         }
         $this->terms($id);
+    }
+
+    public function termMetadata(): void
+    {
+        if (!self::pageView()) {
+            $this->all();
+        }
     }
 
     /**

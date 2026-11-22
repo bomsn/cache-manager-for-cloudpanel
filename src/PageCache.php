@@ -2,19 +2,15 @@
 namespace CacheManagerForCloudPanel;
 
 /**
- * The server page cache (Varnish), cleared through the local cache service.
+ * The server page cache (Varnish): CloudPanel's own, the Companion's, or both.
  *
  * Whole-site clears use the durable InvalidationQueue, exactly like automatic
  * invalidation, so a manual clear gets the same record-then-send and retry
- * guarantees. Single pages use a direct URL ban.
+ * guarantees. Single pages go to each server, which clears just the page when
+ * it can.
  */
 final class PageCache implements UrlLayer
 {
-    private const MAX_TARGET_LENGTH = 2048;
-
-    /** Same campaign parameters the server policy strips before looking up a page. */
-    private const TRACKING_PARAMETER = '/^(utm_[a-z]+|gclid|gbraid|wbraid|fbclid|msclkid|mc_cid|mc_eid)$/';
-
     public function __construct(
         private Configuration $configuration,
         private InvalidationQueue $queue,
@@ -44,7 +40,7 @@ final class PageCache implements UrlLayer
     public function unavailable(): string
     {
         if (!$this->configuration->switchedOn()) {
-            return __('The page cache is not switched on for this site in wp-config.php.', 'cache-manager-for-cloudpanel');
+            return __('No page cache was found for this site. Switch on Varnish Cache for the site in CloudPanel, or set up the CloudPanel Companion.', 'cache-manager-for-cloudpanel');
         }
         return $this->configuration->error();
     }
@@ -66,8 +62,13 @@ final class PageCache implements UrlLayer
                 $this->configuration->error()
             );
         }
-        if (!$this->configuration->available()) {
-            return __('Page cache is bypassed: the cache service is not ready, so pages are served uncached until it recovers.', 'cache-manager-for-cloudpanel');
+        $unavailable = $this->configuration->unavailable();
+        if ($unavailable) {
+            return sprintf(
+                /* translators: %s: cache server names, e.g. "CloudPanel Companion" */
+                __('Page cache is bypassed: %s is not ready, so pages are served uncached until it recovers.', 'cache-manager-for-cloudpanel'),
+                self::names($unavailable)
+            );
         }
         if ($this->queue->failed()) {
             return $this->queue->pending() > 0
@@ -87,8 +88,10 @@ final class PageCache implements UrlLayer
                 'details' => [],
             ];
         }
+        $servers = $this->configuration->servers();
         $details = [
-            __('Keeps pages for', 'cache-manager-for-cloudpanel') => human_time_diff(0, $this->configuration->originTtl()),
+            _n('Cache server', 'Cache servers', count($servers), 'cache-manager-for-cloudpanel') => self::names($servers),
+            __('Keeps pages for', 'cache-manager-for-cloudpanel') => self::lifetimes($servers),
         ];
         $attention = $this->attention();
         if ($attention !== '') {
@@ -123,7 +126,7 @@ final class PageCache implements UrlLayer
     {
         if (!$this->queue->clearNow()) {
             return Result::error($this->queue->pending() > 0
-                ? __('The cache service did not confirm the clear. It is queued and retries automatically.', 'cache-manager-for-cloudpanel')
+                ? __('The page cache did not confirm the clear. It is queued and retries automatically.', 'cache-manager-for-cloudpanel')
                 : __('The clear could not be recorded in the database, so it will not be retried. Try again once the database has recovered.', 'cache-manager-for-cloudpanel'));
         }
         return Result::success($this->withWarmup(
@@ -134,30 +137,33 @@ final class PageCache implements UrlLayer
 
     public function clearUrl(string $url): Result
     {
-        $target = self::requestTarget($url, $this->configuration->host());
-        if (is_wp_error($target)) {
-            return Result::error($target->get_error_message());
+        $servers = $this->configuration->servers();
+        $scopes = [];
+        $failures = [];
+        foreach ($servers as $server) {
+            $outcome = $server->clearPage($url);
+            if (in_array($outcome, [PageCacheServer::PAGE, PageCacheServer::SITE], true)) {
+                $scopes[] = $outcome;
+            } else {
+                $failures[] = count($servers) > 1 ? $server->label() . ': ' . $outcome : $outcome;
+            }
         }
-        $response = $this->configuration->purge($target);
-        $policy = Configuration::policy($response);
-        if ($policy === Configuration::URL_POLICY) {
-            // The service repeats each ban about a minute later, which catches a
+        if (!$failures && !in_array(PageCacheServer::SITE, $scopes, true)) {
+            // The Companion repeats each ban about a minute later, which catches a
             // copy that was being fetched while the first ban ran.
             return Result::success($this->withWarmup(
                 __('Cleared this page. An old copy can take up to a minute to disappear.', 'cache-manager-for-cloudpanel'),
                 $this->warmer->schedule([$url])
             ));
         }
-        if ($policy === Configuration::SITE_POLICY) {
-            // Older services ignore the URL and start a new site revision; newer ones
-            // do the same when a ban is refused or too many are waiting.
+        if (!$failures) {
             return Result::success($this->withWarmup(
-                __('Cleared the whole site: the cache service could not clear just this page.', 'cache-manager-for-cloudpanel'),
+                __('Cleared the whole site: the page cache could not clear just this page.', 'cache-manager-for-cloudpanel'),
                 $this->warmer->schedule()
             ));
         }
-        // Any other answer leaves the page's freshness unknown. Fall back to the
-        // durable whole-site clear, which retries until the service confirms it.
+        // A server that did not confirm leaves the page's freshness unknown. Fall back
+        // to the durable whole-site clear, which retries until every server confirms.
         $site = $this->clear();
         if (!$site->ok()) {
             return $site;
@@ -165,70 +171,45 @@ final class PageCache implements UrlLayer
         return Result::success(sprintf(
             /* translators: 1: why the page could not be cleared on its own, 2: result of the whole-site clear */
             __('Could not clear just this page (%1$s). %2$s', 'cache-manager-for-cloudpanel'),
-            self::describe($response),
+            implode('; ', $failures),
             $site->message
         ));
     }
 
-    /**
-     * Check the purge key and the path to Varnish with the service's OPTIONS
-     * check, which never clears anything.
-     */
+    /** Check every server the site uses, without clearing any page. */
     public function test(): Result
     {
-        $response = $this->configuration->check();
-        $code = is_wp_error($response) ? 0 : (int) wp_remote_retrieve_response_code($response);
-        if ($code === 200 && Configuration::policy($response) !== '') {
-            return Result::success(__('The cache service accepted the purge key and can reach Varnish. Nothing was cleared.', 'cache-manager-for-cloudpanel'));
+        $servers = $this->configuration->servers();
+        $messages = [];
+        $failed = false;
+        foreach ($servers as $server) {
+            $result = $server->test();
+            $failed = $failed || !$result->ok();
+            $messages[] = count($servers) > 1 ? $server->label() . ': ' . $result->message : $result->message;
         }
-        return Result::error(match ($code) {
-            403 => __('The cache service rejected the purge key in wp-config.php, or does not know this site\'s host.', 'cache-manager-for-cloudpanel'),
-            400 => __('The cache service refused the check as malformed (HTTP 400).', 'cache-manager-for-cloudpanel'),
-            503 => __('The purge key is valid, but the cache service cannot reach Varnish, so clears would fail.', 'cache-manager-for-cloudpanel'),
-            501 => __('The CloudPanel Companion on this server is too old to check the connection. Nothing was cleared; ask the server operator to update the Companion.', 'cache-manager-for-cloudpanel'),
-            default => sprintf(
-                /* translators: %s: error or HTTP status */
-                __('The cache service did not answer as expected (%s).', 'cache-manager-for-cloudpanel'),
-                self::describe($response)
-            ),
-        });
+        $message = implode(' ', $messages);
+        return $failed ? Result::error($message) : Result::success($message);
+    }
+
+    /** @param list<PageCacheServer> $servers */
+    private static function names(array $servers): string
+    {
+        return implode(', ', array_map(static fn (PageCacheServer $server): string => $server->label(), $servers));
     }
 
     /**
-     * The path and query to ban, as visitors request it: percent-encoded and
-     * without campaign parameters, which the server policy strips before lookup.
-     * The value travels in a request header, so anything outside printable ASCII
-     * is encoded or rejected here rather than by the service.
+     * How long each server keeps pages: "1 hour", or with several servers
+     * "1 week (CloudPanel Varnish), 1 hour (CloudPanel Companion)".
+     *
+     * @param list<PageCacheServer> $servers
      */
-    public static function requestTarget(string $url, string $host): string|\WP_Error
+    private static function lifetimes(array $servers): string
     {
-        $parts = wp_parse_url($url);
-        if (!is_array($parts) || strtolower($parts['host'] ?? '') !== $host) {
-            return new \WP_Error('cache_manager_for_cloudpanel_url', __('That address is not on this site.', 'cache-manager-for-cloudpanel'));
-        }
-        $target = (string) ($parts['path'] ?? '/');
-        $target = $target === '' ? '/' : $target;
-        if (isset($parts['query']) && $parts['query'] !== '') {
-            $kept = array_filter(explode('&', $parts['query']), static function (string $pair): bool {
-                return $pair !== '' && !preg_match(self::TRACKING_PARAMETER, explode('=', $pair, 2)[0]);
-            });
-            if ($kept) {
-                $target .= '?' . implode('&', $kept);
-            }
-        }
-        $target = preg_replace_callback('/[\x80-\xFF ]/', static fn (array $byte): string => rawurlencode($byte[0]), $target);
-        if (strlen($target) > self::MAX_TARGET_LENGTH || !preg_match('#^/[\x21-\x7E]*$#D', $target)) {
-            return new \WP_Error('cache_manager_for_cloudpanel_url', __('That address cannot be cleared on its own.', 'cache-manager-for-cloudpanel'));
-        }
-        return $target;
-    }
-
-    private static function describe(array|\WP_Error $response): string
-    {
-        return is_wp_error($response)
-            ? $response->get_error_message()
-            /* translators: %d: HTTP status code */
-            : sprintf(__('HTTP %d', 'cache-manager-for-cloudpanel'), (int) wp_remote_retrieve_response_code($response));
+        $lifetimes = array_map(static function (PageCacheServer $server) use ($servers): string {
+            $lifetime = $server->ttl() > 0 ? human_time_diff(0, $server->ttl()) : __('until cleared', 'cache-manager-for-cloudpanel');
+            return count($servers) > 1 ? $lifetime . ' (' . $server->label() . ')' : $lifetime;
+        }, $servers);
+        return implode(', ', $lifetimes);
     }
 
     private function withWarmup(string $message, int $pages): string

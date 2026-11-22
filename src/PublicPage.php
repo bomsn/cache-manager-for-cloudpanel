@@ -1,6 +1,11 @@
 <?php
 namespace CacheManagerForCloudPanel;
 
+/**
+ * Marks pages the Companion's server policy may cache. The headers here are that
+ * policy's contract, so this does nothing unless the site uses the Companion;
+ * CloudPanel's own Varnish controller sends its own caching headers.
+ */
 final class PublicPage
 {
     public function __construct(private Configuration $configuration) {}
@@ -12,7 +17,11 @@ final class PublicPage
 
     public function prepare(): void
     {
-        if ($this->configuration->enabled() && !$this->configuration->available()) {
+        $companion = $this->configuration->companion();
+        if ($companion === null || !$this->configuration->enabled()) {
+            return;
+        }
+        if (!$companion->available()) {
             // Service failure must also stop an upstream cache from storing
             // newly rendered pages while local invalidation is unavailable.
             if (!headers_sent()) {
@@ -20,7 +29,7 @@ final class PublicPage
             }
             return;
         }
-        if (!$this->configuration->enabled() || headers_sent() ||
+        if (headers_sent() ||
             !in_array($_SERVER['REQUEST_METHOD'] ?? '', ['GET', 'HEAD'], true) ||
             !empty($_COOKIE) || !empty($_GET) || !empty($_SERVER['HTTP_AUTHORIZATION']) ||
             is_user_logged_in() || is_admin() || wp_doing_ajax() || is_preview() ||
@@ -45,6 +54,6 @@ final class PublicPage
         // s-maxage is what Cloudflare and browsers may keep; the origin lifetime is
         // read only by the server policy, which removes it before the response leaves.
         header('Cache-Control: public, max-age=0, s-maxage=300, must-revalidate');
-        header('X-Cache-Manager-For-CloudPanel-Origin-TTL: ' . $this->configuration->originTtl());
+        header('X-Cache-Manager-For-CloudPanel-Origin-TTL: ' . $companion->ttl());
     }
 }

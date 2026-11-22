@@ -76,6 +76,7 @@ namespace {
     function wp_doing_ajax() { return $GLOBALS['test']['ajax'] ?? false; }
     function wp_doing_cron() { return $GLOBALS['test']['cron'] ?? false; }
     function get_post($id) { return new WP_Post(); }
+    function url_to_postid($url) { return $GLOBALS['test']['posts'][$url] ?? 0; }
     function current_user_can($capability) { return $capability === 'manage_options' && $GLOBALS['test']['can']; }
     function add_action($hook, $callback, $priority = 10, $accepted = 1) { $GLOBALS['test']['hooks'][$hook][] = [$callback, $accepted]; return true; }
     function current_filter() { return $GLOBALS['test']['filter']; }
@@ -176,10 +177,38 @@ namespace {
         $GLOBALS['wpdb'] = new FakeWpdb();
     }
 
-    /** @return array{0: P\CacheLayers, 1: P\PageCache, 2: P\Cloudflare} */
-    function build(): array
+    /**
+     * The page cache servers the checks run against: by default the Companion
+     * (switched on by the constants above) and CloudPanel's Varnish without a
+     * settings file, so results never depend on the machine running them.
+     *
+     * @param list<P\PageCacheServer>|null $servers
+     */
+    function configuration(?array $servers = null): P\Configuration
     {
-        $configuration = new P\Configuration();
+        return new P\Configuration($servers ?? [
+            new P\CloudPanelVarnish('shop.example.com', __DIR__ . '/fixtures/no-such-settings.json'),
+            new P\CompanionServer('shop.example.com'),
+        ]);
+    }
+
+    /** CloudPanel's Varnish, reading settings written to a temporary settings.json. */
+    function cloudpanel(array|string $settings): P\CloudPanelVarnish
+    {
+        $file = tempnam(sys_get_temp_dir(), 'cmcp');
+        file_put_contents($file, is_array($settings) ? json_encode($settings) : $settings);
+        return new P\CloudPanelVarnish('shop.example.com', $file);
+    }
+
+    const CLOUDPANEL_SETTINGS = ['enabled' => true, 'server' => '127.0.0.1:6081', 'cacheTagPrefix' => '96b1', 'cacheLifetime' => '604800'];
+
+    /**
+     * @param list<P\PageCacheServer>|null $servers
+     * @return array{0: P\CacheLayers, 1: P\PageCache, 2: P\Cloudflare}
+     */
+    function build(?array $servers = null): array
+    {
+        $configuration = configuration($servers);
         $settings = new P\Settings();
         $queue = new P\InvalidationQueue($configuration);
         $page = new P\PageCache($configuration, $queue, new P\CacheWarmer($configuration, $settings));
@@ -189,14 +218,14 @@ namespace {
 
     // Page cache: the request target sent to the cache service.
     $host = 'shop.example.com';
-    check(P\PageCache::requestTarget('https://shop.example.com/shop/?utm_source=x&color=red&gclid=1', $host) === '/shop/?color=red', 'campaign parameters are stripped, others kept');
-    check(P\PageCache::requestTarget('https://shop.example.com/?utm_medium=email', $host) === '/', 'a query of only campaign parameters is dropped');
-    check(P\PageCache::requestTarget('https://shop.example.com', $host) === '/', 'an empty path becomes /');
-    check(P\PageCache::requestTarget('https://shop.example.com/café/a b', $host) === '/caf%C3%A9/a%20b', 'non-ASCII bytes and spaces are percent-encoded');
-    check(is_wp_error(P\PageCache::requestTarget('https://other.example.com/', $host)), 'another host is refused');
-    $injected = P\PageCache::requestTarget("https://shop.example.com/a\r\nX-Injected: 1", $host);
+    check(P\CompanionServer::requestTarget('https://shop.example.com/shop/?utm_source=x&color=red&gclid=1', $host) === '/shop/?color=red', 'campaign parameters are stripped, others kept');
+    check(P\CompanionServer::requestTarget('https://shop.example.com/?utm_medium=email', $host) === '/', 'a query of only campaign parameters is dropped');
+    check(P\CompanionServer::requestTarget('https://shop.example.com', $host) === '/', 'an empty path becomes /');
+    check(P\CompanionServer::requestTarget('https://shop.example.com/café/a b', $host) === '/caf%C3%A9/a%20b', 'non-ASCII bytes and spaces are percent-encoded');
+    check(is_wp_error(P\CompanionServer::requestTarget('https://other.example.com/', $host)), 'another host is refused');
+    $injected = P\CompanionServer::requestTarget("https://shop.example.com/a\r\nX-Injected: 1", $host);
     check(is_wp_error($injected) || !preg_match('/[\r\n]/', $injected), 'CR/LF never reaches the header');
-    check(is_wp_error(P\PageCache::requestTarget('https://shop.example.com/' . str_repeat('a', 2048), $host)), 'targets over 2048 characters are refused');
+    check(is_wp_error(P\CompanionServer::requestTarget('https://shop.example.com/' . str_repeat('a', 2048), $host)), 'targets over 2048 characters are refused');
 
     reset_state();
     [$layers, $page] = build();
@@ -268,6 +297,99 @@ namespace {
         $result = $page->test();
         check($result->status === P\Result::ERROR && str_contains($result->message, $expected), $label);
     }
+
+    // CloudPanel's own Varnish, without the Companion: read from its settings.json.
+    reset_state();
+    [$layers, $page] = build([cloudpanel(CLOUDPANEL_SETTINGS)]);
+    $GLOBALS['test']['responses'] = [respond(200)];
+    $result = $page->clear();
+    $sent = $GLOBALS['test']['requests'][0] ?? [];
+    check($result->ok() && $GLOBALS['wpdb']->row === null && count($GLOBALS['test']['requests']) === 1,
+        "CloudPanel's Varnish alone runs the page cache and confirms a whole-site clear");
+    check($sent['url'] === 'http://127.0.0.1:6081/' && $sent['method'] === 'PURGE'
+        && $sent['headers'] === ['Host' => $host, 'X-Cache-Tags' => '96b1'],
+        "a whole-site clear sends CloudPanel's own request: PURGE to its server with the site's tag prefix");
+    $status = $page->status();
+    check($status['tone'] === 'good' && $status['details']['Cache server'] === 'CloudPanel Varnish' && $layers->overview([
+        'page_cache' => $status])['tone'] === 'good', 'the status card names CloudPanel Varnish and reads as ready');
+
+    reset_state();
+    [, $page] = build([cloudpanel(CLOUDPANEL_SETTINGS)]);
+    $GLOBALS['test']['responses'] = [respond(405)];
+    $result = $page->clear();
+    check($result->status === P\Result::ERROR && $GLOBALS['wpdb']->row !== null && str_contains($page->attention(), 'queued'),
+        'a refused purge (HTTP 405) fails, stays queued for retry, and the page cache asks for attention');
+
+    reset_state();
+    $GLOBALS['test']['posts']['https://shop.example.com/a-post/'] = 12;
+    [, $page] = build([cloudpanel(CLOUDPANEL_SETTINGS)]);
+    $GLOBALS['test']['responses'] = [respond(200), respond(200)];
+    $single = $page->clearUrl('https://shop.example.com/a-post/');
+    $other = $page->clearUrl('https://shop.example.com/category/news/');
+    [$postPurge, $sitePurge] = $GLOBALS['test']['requests'];
+    check($single->ok() && str_contains($single->message, 'Cleared this page') && $postPurge['headers']['X-Cache-Tags'] === '96b1-post-12',
+        "a page that shows a post is cleared through the post's tag");
+    check($other->ok() && str_contains($other->message, 'whole site') && $sitePurge['headers']['X-Cache-Tags'] === '96b1',
+        'any other address clears the whole site');
+
+    reset_state();
+    [, $page] = build([cloudpanel(CLOUDPANEL_SETTINGS)]);
+    $GLOBALS['test']['responses'] = [respond(200)];
+    $result = $page->test();
+    check($result->ok() && str_contains($result->message, 'Nothing was cleared')
+        && $GLOBALS['test']['requests'][0]['headers']['X-Cache-Tags'] === '96b1-cache-manager-for-cloudpanel-test'
+        && $GLOBALS['wpdb']->row === null, 'the connection test purges a tag no page carries');
+
+    reset_state();
+    $settings = [
+        'switched off in CloudPanel is not a page cache' => [['enabled' => false] + CLOUDPANEL_SETTINGS, false, ''],
+        'an unreadable settings file is reported, not taken as switched off' => ['{not json', true, 'could not be read'],
+        'a settings file without a host:port server is reported' => [['server' => 'http://127.0.0.1'] + CLOUDPANEL_SETTINGS, true, 'no valid server'],
+        'a tag prefix that is not plain characters is reported' => [['cacheTagPrefix' => 'a.*'] + CLOUDPANEL_SETTINGS, true, 'no valid cache tag prefix'],
+    ];
+    foreach ($settings as $label => [$content, $switchedOn, $error]) {
+        $configuration = configuration([cloudpanel($content)]);
+        check($configuration->switchedOn() === $switchedOn && str_contains($configuration->error(), $error)
+            && $configuration->enabled() === false, $label);
+    }
+    check(!configuration([new P\CloudPanelVarnish($host, __DIR__ . '/fixtures/no-such-settings.json')])->switchedOn(),
+        'a site without CloudPanel settings has no CloudPanel page cache');
+
+    // CloudPanel's Varnish and the Companion together: every clear reaches both.
+    $both = static fn (): array => [cloudpanel(CLOUDPANEL_SETTINGS), new P\CompanionServer('shop.example.com')];
+    reset_state();
+    [, $page] = build($both());
+    $GLOBALS['test']['responses'] = [respond(405), respond(200, ['x-cache-manager-for-cloudpanel-policy' => 'site-revision-v1'])];
+    $failed = $page->clear();
+    $reached = array_column($GLOBALS['test']['requests'], 'url');
+    check($failed->status === P\Result::ERROR && $GLOBALS['wpdb']->row !== null && $reached === ['http://127.0.0.1:6081/', 'http://127.0.0.1:8081/'],
+        'a clear is sent to both servers even when the first fails, and is confirmed only when both confirm');
+    $GLOBALS['test']['responses'] = [respond(200), respond(200, ['x-cache-manager-for-cloudpanel-policy' => 'site-revision-v1'])];
+    check($page->clear()->ok() && $GLOBALS['wpdb']->row === null, 'once both confirm, the queued clear is done');
+
+    reset_state();
+    $GLOBALS['test']['posts']['https://shop.example.com/a-post/'] = 12;
+    [, $page] = build($both());
+    $GLOBALS['test']['responses'] = [respond(200), respond(200, ['x-cache-manager-for-cloudpanel-policy' => 'url-ban-v1'])];
+    check(str_contains($page->clearUrl('https://shop.example.com/a-post/')->message, 'Cleared this page'), 'a page both servers clear alone is reported as this page only');
+    $GLOBALS['test']['responses'] = [respond(503), respond(200, ['x-cache-manager-for-cloudpanel-policy' => 'url-ban-v1']),
+        respond(200), respond(200, ['x-cache-manager-for-cloudpanel-policy' => 'site-revision-v1'])];
+    $result = $page->clearUrl('https://shop.example.com/a-post/');
+    check($result->ok() && str_contains($result->message, 'CloudPanel Varnish: ') && str_contains($result->message, 'HTTP 503')
+        && str_contains($result->message, 'Cleared the whole site'), 'a server that cannot clear the page is named, and the whole site is cleared on both');
+
+    reset_state();
+    [, $page] = build($both());
+    $GLOBALS['test']['responses'] = [respond(200), respond(200, ['x-cache-manager-for-cloudpanel-policy' => 'url-ban-v1'])];
+    $result = $page->test();
+    check($result->ok() && str_contains($result->message, 'CloudPanel Varnish: ') && str_contains($result->message, 'CloudPanel Companion: '),
+        'the connection test checks both servers and says which said what');
+    $details = $page->status()['details'];
+    check($details['Cache servers'] === 'CloudPanel Varnish, CloudPanel Companion'
+        && $details['Keeps pages for'] === 'a while (CloudPanel Varnish), a while (CloudPanel Companion)',
+        'with both servers the status card lists each one and how long it keeps pages');
+    check(str_starts_with(configuration([cloudpanel(['cacheTagPrefix' => ''] + CLOUDPANEL_SETTINGS), new P\CompanionServer('shop.example.com')])->error(),
+        'CloudPanel Varnish: '), 'with both servers a problem names the server it belongs to');
 
     // Cloudflare.
     check(P\Cloudflare::zoneCandidates('shop.example.co.uk') === ['shop.example.co.uk', 'example.co.uk', 'co.uk'], 'zone candidates run from most specific to two labels');
@@ -435,13 +557,13 @@ namespace {
 
     // Warming.
     reset_state();
-    $warmer = new P\CacheWarmer(new P\Configuration(), new P\Settings());
+    $warmer = new P\CacheWarmer(configuration(), new P\Settings());
     $warmer->schedule(['https://shop.example.com/a/', 'https://other.example.com/x', '/b/', 'https://shop.example.com/a/#top', 'https://shop.example.com/q?x=1']);
     check(($GLOBALS['test']['events'][0][1][0] ?? []) === ['https://shop.example.com/a/', 'https://shop.example.com/b/'],
         'warming keeps distinct same-host URLs without a query');
     update_option(P\Settings::OPTION, ['warm' => false]);
     $GLOBALS['test']['events'] = [];
-    check((new P\CacheWarmer(new P\Configuration(), new P\Settings()))->schedule() === 0 && !$GLOBALS['test']['events'], 'warming can be switched off');
+    check((new P\CacheWarmer(configuration(), new P\Settings()))->schedule() === 0 && !$GLOBALS['test']['events'], 'warming can be switched off');
     update_option(P\Settings::OPTION, ['warm_limit' => '500']);
     check((new P\Settings())->warmLimit() === P\Settings::WARM_LIMIT_MAXIMUM && P\Settings::boundedWarmLimit('x') === P\Settings::WARM_LIMIT_DEFAULT,
         'the warming limit is bounded by one rule');
@@ -453,7 +575,7 @@ namespace {
         if ($method !== '') {
             $_SERVER['REQUEST_METHOD'] = $method;
         }
-        (new P\ContentInvalidation(new P\InvalidationQueue(new P\Configuration())))->metadata(1, 42, '_eael_post_view_count');
+        (new P\ContentInvalidation(new P\InvalidationQueue(configuration())))->metadata(1, 42, '_eael_post_view_count');
         unset($_SERVER['REQUEST_METHOD']);
         return $GLOBALS['wpdb']->row !== null;
     };
@@ -464,13 +586,24 @@ namespace {
         'a metadata write from a form, an admin save or an AJAX save still clears the page cache');
     check($metadata('GET', true) && $metadata('GET', false, false, true) && $metadata(''),
         'a metadata write from an admin screen, a scheduled task or the command line still clears the page cache');
+    $termMetadata = static function (string $method): bool {
+        reset_state();
+        $GLOBALS['test']['admin'] = false;
+        $_SERVER['REQUEST_METHOD'] = $method;
+        (new P\ContentInvalidation(new P\InvalidationQueue(configuration())))->register();
+        run_hook('updated_term_meta', 1, 7, 'category_icon', '<svg/>');
+        unset($_SERVER['REQUEST_METHOD']);
+        return $GLOBALS['wpdb']->row !== null;
+    };
+    check($termMetadata('POST') && !$termMetadata('GET'),
+        'a term meta save (a category icon) clears the page cache; a term meta write while a visitor reads a page does not');
 
     // Change notice: plugin, theme and WordPress changes, gathered into one site-wide record.
-    $setup = static function (): array {
+    $setup = static function (?array $servers = null): array {
         reset_state();
-        [$layers, $page] = build();
+        [$layers, $page] = build($servers);
         // Registered as in the plugin, so the notice's claim is checked against the real clearing hooks.
-        (new P\ContentInvalidation(new P\InvalidationQueue(new P\Configuration())))->register();
+        (new P\ContentInvalidation(new P\InvalidationQueue(configuration($servers))))->register();
         $notice = new P\ChangeNotice($page);
         $notice->register();
         $GLOBALS['test']['plugins'] = [
@@ -520,7 +653,7 @@ namespace {
         'Clear all ends the notice, also when a cache fails (its own report lists the failure)');
 
     run_hook('activated_plugin', 'hello.php', false);
-    $actions = new P\Actions($layers, new P\Configuration());
+    $actions = new P\Actions($layers, configuration());
     $dismiss = (new ReflectionMethod($actions, 'operation'))->invoke($actions, 'dismiss-changes');
     check(get_option(P\ChangeNotice::OPTION) !== false && $dismiss() === null && get_option(P\ChangeNotice::OPTION) === false,
         'Dismiss removes the record and adds no result notice');
@@ -556,10 +689,8 @@ namespace {
     run_hook('activated_plugin', 'woocommerce/woocommerce.php', false);
     check(!str_contains(rendered($notice), 'The page cache was cleared'), 'one change that left the page cache alone keeps the whole notice neutral');
 
-    [$notice] = $setup();
-    $GLOBALS['clpVarnish'] = true;
+    [$notice] = $setup([]);
     run_hook('upgrader_process_complete', $updated, $elementor);
-    unset($GLOBALS['clpVarnish']);
     check(str_contains(rendered($notice), '<strong>The Elementor plugin was updated.</strong> If anything looks out of date, clear all caches.'),
         'with the page cache off, the notice does not claim it was cleared');
 

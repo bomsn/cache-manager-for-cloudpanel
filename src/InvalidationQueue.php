@@ -3,7 +3,7 @@ namespace CacheManagerForCloudPanel;
 
 /**
  * Durable whole-site invalidation: record first, send at the end of the request,
- * retry from WP-Cron until the cache service confirms.
+ * retry from WP-Cron until every page cache server confirms.
  *
  * The table holds one row (tag "site"). Its revision rises with every recorded
  * change, so a confirmation only acknowledges the revision it was sent for.
@@ -73,7 +73,7 @@ final class InvalidationQueue
         $table = self::table();
         $row = $wpdb->get_row($wpdb->prepare("SELECT revision, attempts FROM $table WHERE tag='site' AND next_attempt <= %d", time()));
         if ($row) {
-            if (Configuration::policy($this->configuration->purge()) === Configuration::SITE_POLICY) {
+            if ($this->configuration->clearSite()) {
                 // A newer write may have arrived while the request was in flight.
                 // Delete only the exact revision that this successful purge covered.
                 $wpdb->query($wpdb->prepare("DELETE FROM $table WHERE tag='site' AND revision=%d", $row->revision));

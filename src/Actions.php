@@ -122,7 +122,7 @@ final class Actions
      */
     private function currentPage(): string
     {
-        // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Validated by PageCache::requestTarget().
+        // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Validated by each page cache server's clearPage() (CompanionServer::requestTarget(), url_to_postid()).
         $uri = isset($_SERVER['REQUEST_URI']) ? (string) wp_unslash($_SERVER['REQUEST_URI']) : '/';
         return $this->configuration->origin() . explode('?', $uri, 2)[0];
     }

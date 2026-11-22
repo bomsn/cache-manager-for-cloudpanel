@@ -8,21 +8,36 @@ A WordPress plugin for sites hosted on [CloudPanel](https://www.cloudpanel.io/).
 
 | Cache | What the plugin does | What it needs |
 |---|---|---|
-| **Page cache** | Serves pages to visitors from Varnish (kept for an hour by default) and clears them as soon as you edit content. | CloudPanel Companion |
+| **Page cache** | Serves pages to visitors from Varnish and clears them as soon as you edit content. | CloudPanel's Varnish Cache switched on for the site, or the CloudPanel Companion |
 | **Cloudflare** | Purges your Cloudflare zone, or a single page, when you ask. | An API token, or the Cloudflare plugin signed in |
 | **Object cache** | Flushes Redis, Memcached or any other persistent object cache. | An object cache drop-in |
 | **WordPress** | Removes expired transients and, if you use Elementor, regenerates its CSS files. | Nothing |
 
-Only the page cache needs the CloudPanel Companion. Without it, the plugin still clears Cloudflare, the object cache and WordPress's own caches, and the page cache simply shows as **Off**.
+The page cache works with either of two Varnish setups, and with both at once:
+
+- **CloudPanel's own Varnish Cache**, switched on in the site's **Varnish Cache** tab in CloudPanel. Nothing else is needed: the plugin reads the settings CloudPanel writes for the site and clears through the same server CloudPanel uses.
+- **The [CloudPanel Companion](https://github.com/bomsn/cloudpanel-companion)**, which sets up its own Varnish and a small local service the plugin talks to.
+
+When a site uses both, every clear goes to both, and a clear only counts as done when both confirm it. With neither, the plugin still clears Cloudflare, the object cache and WordPress's own caches, and the page cache simply shows as **Off**.
 
 ## Requirements
 
 - WordPress 6.2 or later and PHP 8.1 or later, on a single site (multisite is not supported).
-- For the page cache: a CloudPanel server with [CloudPanel Companion](https://github.com/bomsn/cloudpanel-companion), which sets up Varnish and the small local service the plugin talks to.
+- For the page cache: a CloudPanel site with Varnish Cache switched on in CloudPanel, or a CloudPanel server with the [CloudPanel Companion](https://github.com/bomsn/cloudpanel-companion).
 
 ## Installation
 
-**With the page cache.** On the server, download the plugin next to the Companion and run the Companion's installer:
+**With CloudPanel's Varnish Cache, or without a page cache.** Switch on Varnish Cache for the site in CloudPanel if you want the page cache, then add the plugin to your site and activate it:
+
+```shell
+cd wp-content/plugins
+git clone https://github.com/bomsn/cache-manager-for-cloudpanel.git
+wp plugin activate cache-manager-for-cloudpanel
+```
+
+You can also activate it under **Plugins** in the dashboard. Run WP-CLI as the site's CloudPanel user (as you normally would), so the plugin finds the Varnish settings in that user's home folder.
+
+**With the CloudPanel Companion.** On the server, download the plugin next to the Companion and run the Companion's installer:
 
 ```shell
 git clone https://github.com/bomsn/cloudpanel-companion.git
@@ -33,16 +48,6 @@ sudo bash install.sh
 
 Answer **yes** when it asks about the page cache and confirm the plugin folder (it suggests the copy next to the Companion). The installer copies the plugin into your site, adds its settings to `wp-config.php`, starts Varnish and activates the plugin.
 
-**Without the page cache.** Add the plugin to your site and activate it:
-
-```shell
-cd wp-content/plugins
-git clone https://github.com/bomsn/cache-manager-for-cloudpanel.git
-wp plugin activate cache-manager-for-cloudpanel
-```
-
-You can also activate it under **Plugins** in the dashboard.
-
 ## Using it
 
 ### Settings > Cache
@@ -50,7 +55,7 @@ You can also activate it under **Plugins** in the dashboard.
 The top of the screen tells you whether every cache is ready or which one needs attention, with two buttons:
 
 - **Clear all caches** clears every cache you chose in the settings (all of them by default).
-- **Test connections** checks that the page cache service accepts your site's purge key and can reach Varnish, and that Cloudflare accepts the sign-in and can find your zone. It never clears anything.
+- **Test connections** checks that the page cache accepts purges from your site (CloudPanel's Varnish takes a purge that matches no page; the Companion's service checks your site's purge key and that it can reach Varnish), and that Cloudflare accepts the sign-in and can find your zone. It never clears any page.
 
 Below that, each cache has a card with its status, the details that matter (how long pages are kept, the last warm-up, the Cloudflare zone, the object cache provider), when it was last cleared and its own button.
 
@@ -118,7 +123,7 @@ wp cloudpanel-cache status                               # the state of each cac
 
 Each release is published as a single commit, so update with a fetch and reset rather than `git pull`.
 
-**With the page cache**, update the folder you cloned, then run the Companion's upgrade from the Companion folder, with your site's address, its CloudPanel site user and its PHP version:
+**With the CloudPanel Companion**, update the folder you cloned, then run the Companion's upgrade from the Companion folder, with your site's address, its CloudPanel site user and its PHP version:
 
 ```shell
 cd cache-manager-for-cloudpanel && git fetch origin && git reset --hard origin/master
@@ -128,7 +133,7 @@ sudo python3 install-cache.py --host shop.example.com --user shop --php 8.3 --pl
 
 It shows a short maintenance page, swaps the plugin, checks the site and puts the old version back automatically if anything fails. Don't copy plugin files over the live folder by hand.
 
-**Without the page cache**, update the plugin folder in your site directly:
+**Otherwise** (CloudPanel's Varnish Cache, or no page cache), update the plugin folder in your site directly:
 
 ```shell
 cd wp-content/plugins/cache-manager-for-cloudpanel && git fetch origin && git reset --hard origin/master
@@ -137,20 +142,22 @@ cd wp-content/plugins/cache-manager-for-cloudpanel && git fetch origin && git re
 ## Deactivating and deleting
 
 - **Deactivating:** while the page cache is on, WordPress only lets you deactivate the plugin once the page cache has been cleared, so visitors never see stale pages.
-- **Deleting** the plugin removes its settings, the saved Cloudflare token, its clear and warm-up history, any pending change notice, its invalidation queue table and its scheduled tasks. The page cache settings in `wp-config.php` stay; to retire the page cache completely, follow "Disabling or retiring an installation" in the Companion's [how-it-works guide](https://github.com/bomsn/cloudpanel-companion/blob/master/docs/how-it-works.md).
+- **Deleting** the plugin removes its settings, the saved Cloudflare token, its clear and warm-up history, any pending change notice, its invalidation queue table and its scheduled tasks. CloudPanel's Varnish Cache stays as set in CloudPanel. With the Companion, its page cache settings in `wp-config.php` stay; to retire that page cache completely, follow "Disabling or retiring an installation" in the Companion's [how-it-works guide](https://github.com/bomsn/cloudpanel-companion/blob/master/docs/how-it-works.md).
 
 ## What the page cache stores
+
+With CloudPanel's own Varnish Cache, CloudPanel's rules decide what is cached; you can add excluded addresses in the site's **Varnish Cache** tab. With the Companion, its policy decides:
 
 **Cached:** normal pages for visitors who aren't logged in, including visitors who only have analytics cookies (Google Analytics, Meta, Hotjar, ContentSquare, Microsoft Clarity, WooCommerce order attribution, Cloudflare bot checks) and links with campaign tags (`utm_*`, `gclid`, `fbclid`, `msclkid`, Mailchimp).
 
 **Never cached:** logged-in users, carts and checkout, account pages, visitors with any other cookie, other query strings, the REST API, `wp-admin`, and any page that sets a cookie or says `private` or `no-store`.
 
-Pages are cleared automatically when you change a post, page, product, price, stock level, category, menu, widget, theme or plugin. Visitors reading the site never clear it, even when a plugin records something on each page view (a view counter, for example). If the cache service stops, the site keeps working and runs uncached until it is back.
+With either setup, pages are cleared automatically when you change a post, page, product, price, stock level, category (including its details, such as an icon or description), menu, widget, theme or plugin. Visitors reading the site never clear it, even when a plugin records something on each page view (a view counter, for example). If the Companion's cache service stops, the site keeps working and runs uncached until it is back. If a clear is not confirmed, it is retried automatically until it is.
 
 ## For developers
 
-- **Check a page:** the `X-Cache-Manager-For-CloudPanel` response header is `HIT` (served from the cache), `MISS` (just built and stored) or `BYPASS` (deliberately not cached).
-- **Clear after your own changes:** if your theme or another plugin changes something this plugin can't see (custom term meta, an options page), clear the page cache for the whole site after saving. It is sent when the request ends, with automatic retries, and does nothing while the page cache is off.
+- **Check a page:** with the Companion, the `X-Cache-Manager-For-CloudPanel` response header is `HIT` (served from the cache), `MISS` (just built and stored) or `BYPASS` (deliberately not cached). With CloudPanel's Varnish, cached pages carry CloudPanel's `X-Cache-Tags` header.
+- **Clear after your own changes:** if your theme or another plugin changes something this plugin can't see (an options page, data in custom tables), clear the page cache for the whole site after saving. It is sent when the request ends, with automatic retries, and does nothing while the page cache is off.
 
   ```php
   do_action( 'cache_manager_for_cloudpanel_purge' );
@@ -165,7 +172,7 @@ Pages are cleared automatically when you change a post, page, product, price, st
   } );
   ```
 
-- **Keep pages longer or shorter:** set `CACHE_MANAGER_FOR_CLOUDPANEL_ORIGIN_TTL` in `wp-config.php` to a number of seconds between 300 and 86400 (the default is 3600). The 5-minute limit for Cloudflare and browsers stays the same.
+- **Keep pages longer or shorter:** with CloudPanel's Varnish, set the cache lifetime in the site's **Varnish Cache** tab. With the Companion, set `CACHE_MANAGER_FOR_CLOUDPANEL_ORIGIN_TTL` in `wp-config.php` to a number of seconds between 300 and 86400 (the default is 3600); its 5-minute limit for Cloudflare and browsers stays the same.
 - **Tests:** `python3 tests/php_checks.py` lints every PHP file and runs the unit checks. It needs only a PHP 8.1+ command line. The Varnish rules in `server/cache-policy.vcl` are tested against real Varnish and the Companion's cache service with `python3 tests/varnish_policy.py /path/to/cloudpanel-companion` (Linux, with `varnishd` installed).
 
 ## License
