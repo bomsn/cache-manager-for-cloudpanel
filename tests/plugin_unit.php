@@ -322,15 +322,30 @@ namespace {
 
     reset_state();
     $GLOBALS['test']['posts']['https://shop.example.com/a-post/'] = 12;
+    $GLOBALS['test']['posts']['https://shop.example.com/'] = 48;
     [, $page] = build([cloudpanel(CLOUDPANEL_SETTINGS)]);
-    $GLOBALS['test']['responses'] = [respond(200), respond(200)];
+    $GLOBALS['test']['responses'] = [respond(200, ['x-cache-tags' => '96b1,96b1-post-12']), respond(200), respond(200)];
     $single = $page->clearUrl('https://shop.example.com/a-post/');
     $other = $page->clearUrl('https://shop.example.com/category/news/');
-    [$postPurge, $sitePurge] = $GLOBALS['test']['requests'];
+    [$lookup, $postPurge, $sitePurge] = $GLOBALS['test']['requests'];
+    check($lookup['method'] === 'GET' && $lookup['url'] === 'http://127.0.0.1:6081/a-post/' && $lookup['headers'] === ['Host' => $host],
+        'a single-page clear first reads the tags Varnish serves the page with');
     check($single->ok() && str_contains($single->message, 'Cleared this page') && $postPurge['headers']['X-Cache-Tags'] === '(^|,)96b1-post-12(,|$)',
-        "a page that shows a post is cleared through the post's tag");
-    check($other->ok() && str_contains($other->message, 'whole site') && $sitePurge['headers']['X-Cache-Tags'] === '(^|,)96b1(,|$)',
-        'any other address clears the whole site');
+        "a page served with its post's tag is cleared through that tag");
+    check($other->ok() && str_contains($other->message, 'whole site') && $sitePurge['headers']['X-Cache-Tags'] === '(^|,)96b1(,|$)'
+        && count($GLOBALS['test']['requests']) === 3, 'an address that names no post clears the whole site without a lookup');
+    $listings = [
+        'a front page that lists products instead of its own page clears the whole site' => respond(200, ['x-cache-tags' => '96b1,96b1-post-55,96b1-post-56']),
+        'a page served without tags clears the whole site' => respond(200),
+        'a page that cannot be loaded clears the whole site' => new WP_Error('http', 'timed out'),
+    ];
+    foreach ($listings as $label => $response) {
+        $GLOBALS['test']['requests'] = [];
+        $GLOBALS['test']['responses'] = [$response, respond(200)];
+        $result = $page->clearUrl('https://shop.example.com/');
+        check($result->ok() && str_contains($result->message, 'whole site')
+            && ($GLOBALS['test']['requests'][1]['headers']['X-Cache-Tags'] ?? '') === '(^|,)96b1(,|$)', $label);
+    }
 
     // CloudPanel's VCL runs the X-Cache-Tags value as a regular expression over each
     // page's stored list, which its controller joins with commas.
@@ -364,6 +379,28 @@ namespace {
     $GLOBALS['test']['responses'] = [respond(405)];
     $GLOBALS['test']['requests'] = [];
     check(!$page->test()->ok() && count($GLOBALS['test']['requests']) === 1, 'a refused purge fails the test before the home page is loaded');
+
+    // A home page that redirects: untagged redirects within the site are followed, a bounded number of times.
+    $GLOBALS['test']['requests'] = [];
+    $GLOBALS['test']['responses'] = [respond(200), respond(301, ['location' => 'http://shop.example.com:8080/en/']),
+        respond(302, ['location' => '/en/home/?lang=en']), respond(200, ['x-cache-tags' => '96b1,96b1-post-3'])];
+    $result = $page->test();
+    check($result->ok() && array_column($GLOBALS['test']['requests'], 'url') === ['http://127.0.0.1:6081/', 'http://127.0.0.1:6081/',
+        'http://127.0.0.1:6081/en/', 'http://127.0.0.1:6081/en/home/?lang=en'], 'the test follows absolute and root-relative redirects within the site');
+    $GLOBALS['test']['requests'] = [];
+    $GLOBALS['test']['responses'] = [respond(200), respond(302, ['location' => 'https://other.example.com/'])];
+    $result = $page->test();
+    check($result->status === P\Result::ERROR && str_contains($result->message, 'redirects to https://other.example.com/, which is not this site')
+        && count($GLOBALS['test']['requests']) === 2, 'a redirect to another site fails the test and is never requested');
+    $GLOBALS['test']['requests'] = [];
+    $GLOBALS['test']['responses'] = [respond(200), respond(302, ['location' => '/a/']), respond(302, ['location' => '/b/']),
+        respond(302, ['location' => '/c/']), respond(302, ['location' => '/d/'])];
+    $result = $page->test();
+    check($result->status === P\Result::ERROR && str_contains($result->message, 'without this site\'s cache tag')
+        && count($GLOBALS['test']['requests']) === 5, 'the test follows at most three redirects');
+    $GLOBALS['test']['requests'] = [];
+    $GLOBALS['test']['responses'] = [respond(200), respond(301, ['location' => '/en/', 'x-cache-tags' => '96b1'])];
+    check($page->test()->ok() && count($GLOBALS['test']['requests']) === 2, 'a redirect that carries the site\'s tag passes without following it');
 
     reset_state();
     $settings = [

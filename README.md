@@ -25,9 +25,9 @@ A server runs one Varnish, so a site uses one of these. Installing the Companion
 When Varnish Cache is switched on for a site, CloudPanel runs a small script of its own before WordPress on every page. It decides which pages Varnish may keep and labels each one with the site's cache tag and the posts it shows. The plugin clears pages by those labels:
 
 - It matches whole labels only, so it never clears another site on the same server, and clearing post 2 never clears post 23.
-- **Clear this page** on a page that shows one post clears that page and the listings that show the post. On any other page (the shop, a category, the posts page) it clears the whole site, because those pages are labelled with the posts they list.
+- **Clear this page** on a page that shows one post clears that page and the listings that show the post. On any other page (the shop, a category, the posts page, a home page that lists products) it clears the whole site, because those pages are labelled with the posts they list. The plugin reads the labels Varnish serves the page with before it decides, so the result it shows is what was cleared.
 - When you save a post in the editor, CloudPanel's script also clears that post's pages. The plugin then clears the whole site, so the home page, listings and menus show the change too. Both can stay on.
-- **Test connections** also loads your home page through Varnish to check it carries the site's cache tag. If it doesn't, CloudPanel's script is not running for the site, and clearing from WordPress would not reach the cached pages.
+- **Test connections** also loads your home page through Varnish (following up to three redirects within your site) to check it carries the site's cache tag. If it doesn't, CloudPanel's script is not running for the site, and clearing from WordPress would not reach the cached pages.
 
 You don't need CloudPanel's **CLP Varnish Cache** plugin. If it is active, the page cache card asks you to deactivate it: it adds a second Cache menu and clears the same cache again. How long pages are kept and which pages are never cached stay in the site's **Varnish Cache** tab in CloudPanel. With the Companion, that plugin cannot clear anything at all.
 

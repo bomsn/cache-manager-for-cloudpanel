@@ -18,6 +18,9 @@ final class CloudPanelVarnish implements PageCacheServer
     /** A tag no page carries, so a connection test clears nothing. */
     private const TEST_TAG_SUFFIX = '-cache-manager-for-cloudpanel-test';
 
+    /** Redirects the connection test follows from the home page, within this site. */
+    private const TEST_REDIRECTS = 3;
+
     /** @var array<string, mixed>|null Null until first read. */
     private ?array $settings = null;
     private string $readError = '';
@@ -75,17 +78,20 @@ final class CloudPanelVarnish implements PageCacheServer
     }
 
     /**
-     * Pages are tagged with the posts they show, not by address. url_to_postid()
-     * names a post only for an address that shows that one post, so its tag clears
-     * the page together with the listings that show the post. Any other address,
-     * such as a shop or a category, lists posts under their own tags and clears
-     * the whole site.
+     * Pages are tagged with the posts they show, not by address, so the page is
+     * cleared by a post's tag only when Varnish serves it with the tag of the post
+     * url_to_postid() names for it: a single post or page, cleared together with
+     * the listings that show it. An address that shows a listing instead (a shop,
+     * the posts page, a front page of products) carries the tags of what it lists,
+     * and it, or a page that cannot be loaded, clears the whole site, so the result
+     * reported is what was cleared.
      */
     public function clearPage(string $url): string
     {
         $post = url_to_postid($url);
-        if ($post > 0) {
-            $error = $this->purge($this->prefix() . '-post-' . $post);
+        $tag = $this->prefix() . '-post-' . $post;
+        if ($post > 0 && $this->serves($url, $tag)) {
+            $error = $this->purge($tag);
             return $error === '' ? self::PAGE : $error;
         }
         $error = $this->purge($this->prefix());
@@ -103,17 +109,14 @@ final class CloudPanelVarnish implements PageCacheServer
         if ($error !== '') {
             return Result::error($error);
         }
-        $home = wp_remote_request($this->endpoint() . ltrim((string) wp_parse_url(home_url('/'), PHP_URL_PATH), '/'), [
-            'method' => 'GET', 'timeout' => 10, 'redirection' => 0, 'headers' => ['Host' => $this->host],
-        ]);
-        if (is_wp_error($home)) {
+        $tags = $this->tags(home_url('/'), self::TEST_REDIRECTS);
+        if (is_string($tags)) {
             return Result::error(sprintf(
-                /* translators: %s: connection error */
+                /* translators: %s: why the page could not be loaded */
                 __('CloudPanel\'s Varnish accepted a purge, but the home page could not be loaded through it: %s', 'cache-manager-for-cloudpanel'),
-                $home->get_error_message()
+                $tags
             ));
         }
-        $tags = explode(',', (string) wp_remote_retrieve_header($home, 'x-cache-tags'));
         if (!in_array($this->prefix(), $tags, true)) {
             return Result::error(__('CloudPanel\'s Varnish accepted a purge, but the home page comes back without this site\'s cache tag, so clears would not reach cached pages. CloudPanel adds the tag while Varnish Cache is switched on for the site: switch it off and on again in the site\'s Varnish Cache tab, or ask the server operator to check the site\'s PHP settings.', 'cache-manager-for-cloudpanel'));
         }
@@ -160,6 +163,50 @@ final class CloudPanelVarnish implements PageCacheServer
                 $code
             ),
         };
+    }
+
+    /** Whether Varnish serves the page at $url with $tag. */
+    private function serves(string $url, string $tag): bool
+    {
+        $tags = $this->tags($url);
+        return is_array($tags) && in_array($tag, $tags, true);
+    }
+
+    /**
+     * The tags CloudPanel's controller gave the page Varnish serves at $url. An
+     * untagged redirect within this site is followed up to $redirects times; one
+     * that leaves the site is never requested.
+     *
+     * @return list<string>|string The tags, empty for an untagged page; otherwise why it could not be loaded.
+     */
+    private function tags(string $url, int $redirects = 0): array|string
+    {
+        $target = CompanionServer::requestTarget($url, $this->host);
+        if (is_wp_error($target)) {
+            return $target->get_error_message();
+        }
+        $response = wp_remote_request($this->endpoint() . ltrim($target, '/'), [
+            'method' => 'GET', 'timeout' => 10, 'redirection' => 0, 'headers' => ['Host' => $this->host],
+        ]);
+        if (is_wp_error($response)) {
+            return $response->get_error_message();
+        }
+        $tags = array_values(array_filter(explode(',', (string) wp_remote_retrieve_header($response, 'x-cache-tags'))));
+        $code = (int) wp_remote_retrieve_response_code($response);
+        $location = (string) wp_remote_retrieve_header($response, 'location');
+        if ($tags !== [] || $redirects === 0 || $code < 300 || $code > 399 || $location === '') {
+            return $tags;
+        }
+        // Root-relative, as a redirect from Nginx or WordPress may be.
+        $next = str_starts_with($location, '/') && !str_starts_with($location, '//') ? 'http://' . $this->host . $location : $location;
+        if (strtolower((string) wp_parse_url($next, PHP_URL_HOST)) !== $this->host) {
+            return sprintf(
+                /* translators: %s: the address redirected to */
+                __('it redirects to %s, which is not this site', 'cache-manager-for-cloudpanel'),
+                $location
+            );
+        }
+        return $this->tags($next, $redirects - 1);
     }
 
     /**
