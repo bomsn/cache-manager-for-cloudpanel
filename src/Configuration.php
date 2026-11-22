@@ -2,51 +2,54 @@
 namespace CacheManagerForCloudPanel;
 
 /**
- * This site's identity (host and origin) and the page cache servers it uses.
+ * This site's identity (host and origin) and the server that manages its page cache.
  *
- * A site can use CloudPanel's own Varnish, the CloudPanel Companion, or both;
- * neither depends on the other. Every clear goes to every server the site uses
- * and counts as confirmed only when all of them confirm, so a page cannot stay
- * stale in one cache because another one was cleared.
+ * The page cache is CloudPanel's own Varnish or the CloudPanel Companion's, never
+ * both: a server runs one Varnish. The Companion comes first because installing it
+ * replaces CloudPanel's Varnish on the server (its own varnishd on the same port,
+ * with a policy that refuses CloudPanel's tag purges) and switches CloudPanel's
+ * controller off for the site. CloudPanel's settings file can still say Varnish
+ * is on afterwards, so it is only used when the Companion is not.
  */
 final class Configuration
 {
-    /** @var list<PageCacheServer> Every server this plugin knows, used or not. */
-    private array $known;
+    /** @var list<PageCacheServer> Candidates, the one that takes precedence first. */
+    private array $candidates;
 
     /**
-     * @param list<PageCacheServer>|null $servers The servers to consider; null for
-     *        CloudPanel's Varnish and the Companion.
+     * @param list<PageCacheServer>|null $candidates Servers to choose from, in order
+     *        of precedence; null for the Companion, then CloudPanel's Varnish.
      */
-    public function __construct(?array $servers = null)
+    public function __construct(?array $candidates = null)
     {
-        $this->known = $servers ?? [
-            new CloudPanelVarnish($this->host()),
+        $this->candidates = $candidates ?? [
             new CompanionServer($this->host()),
+            new CloudPanelVarnish($this->host()),
         ];
     }
 
-    /** @return list<PageCacheServer> The servers this site uses. */
-    public function servers(): array
+    /** The server that manages this site's page cache, or null when it has none. */
+    public function server(): ?PageCacheServer
     {
-        return array_values(array_filter($this->known, static fn (PageCacheServer $server): bool => $server->present()));
-    }
-
-    /** The Companion server when this site uses it, for the headers its server policy reads. */
-    public function companion(): ?CompanionServer
-    {
-        foreach ($this->servers() as $server) {
-            if ($server instanceof CompanionServer) {
+        foreach ($this->candidates as $server) {
+            if ($server->present()) {
                 return $server;
             }
         }
         return null;
     }
 
-    /** Whether this site uses a page cache server at all, whatever the state of its configuration. */
+    /** The Companion when it manages the page cache, for the headers its server policy reads. */
+    public function companion(): ?CompanionServer
+    {
+        $server = $this->server();
+        return $server instanceof CompanionServer ? $server : null;
+    }
+
+    /** Whether this site has a page cache at all, whatever the state of its configuration. */
     public function switchedOn(): bool
     {
-        return $this->servers() !== [];
+        return $this->server() !== null;
     }
 
     public function enabled(): bool
@@ -54,45 +57,25 @@ final class Configuration
         return $this->switchedOn() && $this->error() === '';
     }
 
-    /** Why the page cache cannot be used, or ''. Names the server when the site uses more than one. */
+    /** Why the page cache cannot be used, or ''. */
     public function error(): string
     {
         if (is_multisite()) {
             return __('Multisite is not supported yet.', 'cache-manager-for-cloudpanel');
         }
-        $servers = $this->servers();
-        foreach ($servers as $server) {
-            $error = $server->error();
-            if ($error !== '') {
-                return count($servers) > 1 ? $server->label() . ': ' . $error : $error;
-            }
-        }
-        return '';
+        return $this->server()?->error() ?? '';
     }
 
-    /** Whether every server the site uses accepts clears right now. */
+    /** Whether the page cache server accepts clears right now. */
     public function available(): bool
     {
-        return $this->enabled() && $this->unavailable() === [];
+        return $this->enabled() && $this->server()->available();
     }
 
-    /** @return list<PageCacheServer> Servers the site uses that do not accept clears right now. */
-    public function unavailable(): array
-    {
-        return array_values(array_filter($this->servers(), static fn (PageCacheServer $server): bool => !$server->available()));
-    }
-
-    /**
-     * Clear the whole site on every server. Each server is tried even when an
-     * earlier one fails; true only when all of them confirmed.
-     */
+    /** Clear the whole site. True once the server has confirmed it. */
     public function clearSite(): bool
     {
-        $confirmed = true;
-        foreach ($this->servers() as $server) {
-            $confirmed = $server->clearSite() && $confirmed;
-        }
-        return $confirmed;
+        return $this->enabled() && $this->server()->clearSite();
     }
 
     public function host(): string

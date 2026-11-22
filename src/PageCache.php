@@ -2,12 +2,13 @@
 namespace CacheManagerForCloudPanel;
 
 /**
- * The server page cache (Varnish): CloudPanel's own, the Companion's, or both.
+ * The server page cache (Varnish), managed by CloudPanel's own Varnish or the
+ * CloudPanel Companion (see Configuration).
  *
  * Whole-site clears use the durable InvalidationQueue, exactly like automatic
  * invalidation, so a manual clear gets the same record-then-send and retry
- * guarantees. Single pages go to each server, which clears just the page when
- * it can.
+ * guarantees. Single pages go straight to the server, which clears just the page
+ * when it can.
  */
 final class PageCache implements UrlLayer
 {
@@ -62,12 +63,11 @@ final class PageCache implements UrlLayer
                 $this->configuration->error()
             );
         }
-        $unavailable = $this->configuration->unavailable();
-        if ($unavailable) {
+        if (!$this->configuration->available()) {
             return sprintf(
-                /* translators: %s: cache server names, e.g. "CloudPanel Companion" */
+                /* translators: %s: cache server name, e.g. "CloudPanel Companion" */
                 __('Page cache is bypassed: %s is not ready, so pages are served uncached until it recovers.', 'cache-manager-for-cloudpanel'),
-                self::names($unavailable)
+                $this->configuration->server()->label()
             );
         }
         if ($this->queue->failed()) {
@@ -88,10 +88,12 @@ final class PageCache implements UrlLayer
                 'details' => [],
             ];
         }
-        $servers = $this->configuration->servers();
+        $server = $this->configuration->server();
         $details = [
-            _n('Cache server', 'Cache servers', count($servers), 'cache-manager-for-cloudpanel') => self::names($servers),
-            __('Keeps pages for', 'cache-manager-for-cloudpanel') => self::lifetimes($servers),
+            __('Cache server', 'cache-manager-for-cloudpanel') => $server->label(),
+            __('Keeps pages for', 'cache-manager-for-cloudpanel') => $server->ttl() > 0
+                ? human_time_diff(0, $server->ttl())
+                : __('until cleared', 'cache-manager-for-cloudpanel'),
         ];
         $attention = $this->attention();
         if ($attention !== '') {
@@ -137,18 +139,8 @@ final class PageCache implements UrlLayer
 
     public function clearUrl(string $url): Result
     {
-        $servers = $this->configuration->servers();
-        $scopes = [];
-        $failures = [];
-        foreach ($servers as $server) {
-            $outcome = $server->clearPage($url);
-            if (in_array($outcome, [PageCacheServer::PAGE, PageCacheServer::SITE], true)) {
-                $scopes[] = $outcome;
-            } else {
-                $failures[] = count($servers) > 1 ? $server->label() . ': ' . $outcome : $outcome;
-            }
-        }
-        if (!$failures && !in_array(PageCacheServer::SITE, $scopes, true)) {
+        $outcome = $this->configuration->server()->clearPage($url);
+        if ($outcome === PageCacheServer::PAGE) {
             // The Companion repeats each ban about a minute later, which catches a
             // copy that was being fetched while the first ban ran.
             return Result::success($this->withWarmup(
@@ -156,14 +148,14 @@ final class PageCache implements UrlLayer
                 $this->warmer->schedule([$url])
             ));
         }
-        if (!$failures) {
+        if ($outcome === PageCacheServer::SITE) {
             return Result::success($this->withWarmup(
                 __('Cleared the whole site: the page cache could not clear just this page.', 'cache-manager-for-cloudpanel'),
                 $this->warmer->schedule()
             ));
         }
-        // A server that did not confirm leaves the page's freshness unknown. Fall back
-        // to the durable whole-site clear, which retries until every server confirms.
+        // Any other answer leaves the page's freshness unknown. Fall back to the
+        // durable whole-site clear, which retries until the server confirms it.
         $site = $this->clear();
         if (!$site->ok()) {
             return $site;
@@ -171,45 +163,15 @@ final class PageCache implements UrlLayer
         return Result::success(sprintf(
             /* translators: 1: why the page could not be cleared on its own, 2: result of the whole-site clear */
             __('Could not clear just this page (%1$s). %2$s', 'cache-manager-for-cloudpanel'),
-            implode('; ', $failures),
+            $outcome,
             $site->message
         ));
     }
 
-    /** Check every server the site uses, without clearing any page. */
+    /** Check the connection to the page cache server, without clearing any page. */
     public function test(): Result
     {
-        $servers = $this->configuration->servers();
-        $messages = [];
-        $failed = false;
-        foreach ($servers as $server) {
-            $result = $server->test();
-            $failed = $failed || !$result->ok();
-            $messages[] = count($servers) > 1 ? $server->label() . ': ' . $result->message : $result->message;
-        }
-        $message = implode(' ', $messages);
-        return $failed ? Result::error($message) : Result::success($message);
-    }
-
-    /** @param list<PageCacheServer> $servers */
-    private static function names(array $servers): string
-    {
-        return implode(', ', array_map(static fn (PageCacheServer $server): string => $server->label(), $servers));
-    }
-
-    /**
-     * How long each server keeps pages: "1 hour", or with several servers
-     * "1 week (CloudPanel Varnish), 1 hour (CloudPanel Companion)".
-     *
-     * @param list<PageCacheServer> $servers
-     */
-    private static function lifetimes(array $servers): string
-    {
-        $lifetimes = array_map(static function (PageCacheServer $server) use ($servers): string {
-            $lifetime = $server->ttl() > 0 ? human_time_diff(0, $server->ttl()) : __('until cleared', 'cache-manager-for-cloudpanel');
-            return count($servers) > 1 ? $lifetime . ' (' . $server->label() . ')' : $lifetime;
-        }, $servers);
-        return implode(', ', $lifetimes);
+        return $this->configuration->server()->test();
     }
 
     private function withWarmup(string $message, int $pages): string

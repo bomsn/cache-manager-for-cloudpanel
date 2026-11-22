@@ -13,12 +13,12 @@ A WordPress plugin for sites hosted on [CloudPanel](https://www.cloudpanel.io/).
 | **Object cache** | Flushes Redis, Memcached or any other persistent object cache. | An object cache drop-in |
 | **WordPress** | Removes expired transients and, if you use Elementor, regenerates its CSS files. | Nothing |
 
-The page cache works with either of two Varnish setups, and with both at once:
+The page cache works with either of two Varnish setups:
 
 - **CloudPanel's own Varnish Cache**, switched on in the site's **Varnish Cache** tab in CloudPanel. Nothing else is needed: the plugin reads the settings CloudPanel writes for the site and clears through the same server CloudPanel uses.
 - **The [CloudPanel Companion](https://github.com/bomsn/cloudpanel-companion)**, which sets up its own Varnish and a small local service the plugin talks to.
 
-When a site uses both, every clear goes to both, and a clear only counts as done when both confirm it. With neither, the plugin still clears Cloudflare, the object cache and WordPress's own caches, and the page cache simply shows as **Off**.
+A server runs one Varnish, so a site uses one of these. Installing the Companion replaces CloudPanel's Varnish on the server, so when the Companion is set up for a site the plugin uses it, even if CloudPanel still shows Varnish Cache as switched on. With neither, the plugin still clears Cloudflare, the object cache and WordPress's own caches, and the page cache simply shows as **Off**.
 
 ## Requirements
 

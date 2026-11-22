@@ -178,17 +178,17 @@ namespace {
     }
 
     /**
-     * The page cache servers the checks run against: by default the Companion
-     * (switched on by the constants above) and CloudPanel's Varnish without a
-     * settings file, so results never depend on the machine running them.
+     * The page cache candidates the checks run against, in production's order: by
+     * default the Companion (switched on by the constants above), then CloudPanel's
+     * Varnish without a settings file, so results never depend on the machine running them.
      *
      * @param list<P\PageCacheServer>|null $servers
      */
     function configuration(?array $servers = null): P\Configuration
     {
         return new P\Configuration($servers ?? [
-            new P\CloudPanelVarnish('shop.example.com', __DIR__ . '/fixtures/no-such-settings.json'),
             new P\CompanionServer('shop.example.com'),
+            new P\CloudPanelVarnish('shop.example.com', __DIR__ . '/fixtures/no-such-settings.json'),
         ]);
     }
 
@@ -355,41 +355,22 @@ namespace {
     check(!configuration([new P\CloudPanelVarnish($host, __DIR__ . '/fixtures/no-such-settings.json')])->switchedOn(),
         'a site without CloudPanel settings has no CloudPanel page cache');
 
-    // CloudPanel's Varnish and the Companion together: every clear reaches both.
-    $both = static fn (): array => [cloudpanel(CLOUDPANEL_SETTINGS), new P\CompanionServer('shop.example.com')];
+    // A Companion site whose CloudPanel settings still say Varnish is on: installing the
+    // Companion replaced CloudPanel's Varnish, so the Companion alone manages the cache.
+    $companionSite = static fn (): array => [new P\CompanionServer('shop.example.com'), cloudpanel(CLOUDPANEL_SETTINGS)];
     reset_state();
-    [, $page] = build($both());
-    $GLOBALS['test']['responses'] = [respond(405), respond(200, ['x-cache-manager-for-cloudpanel-policy' => 'site-revision-v1'])];
-    $failed = $page->clear();
-    $reached = array_column($GLOBALS['test']['requests'], 'url');
-    check($failed->status === P\Result::ERROR && $GLOBALS['wpdb']->row !== null && $reached === ['http://127.0.0.1:6081/', 'http://127.0.0.1:8081/'],
-        'a clear is sent to both servers even when the first fails, and is confirmed only when both confirm');
-    $GLOBALS['test']['responses'] = [respond(200), respond(200, ['x-cache-manager-for-cloudpanel-policy' => 'site-revision-v1'])];
-    check($page->clear()->ok() && $GLOBALS['wpdb']->row === null, 'once both confirm, the queued clear is done');
-
-    reset_state();
-    $GLOBALS['test']['posts']['https://shop.example.com/a-post/'] = 12;
-    [, $page] = build($both());
-    $GLOBALS['test']['responses'] = [respond(200), respond(200, ['x-cache-manager-for-cloudpanel-policy' => 'url-ban-v1'])];
-    check(str_contains($page->clearUrl('https://shop.example.com/a-post/')->message, 'Cleared this page'), 'a page both servers clear alone is reported as this page only');
-    $GLOBALS['test']['responses'] = [respond(503), respond(200, ['x-cache-manager-for-cloudpanel-policy' => 'url-ban-v1']),
-        respond(200), respond(200, ['x-cache-manager-for-cloudpanel-policy' => 'site-revision-v1'])];
-    $result = $page->clearUrl('https://shop.example.com/a-post/');
-    check($result->ok() && str_contains($result->message, 'CloudPanel Varnish: ') && str_contains($result->message, 'HTTP 503')
-        && str_contains($result->message, 'Cleared the whole site'), 'a server that cannot clear the page is named, and the whole site is cleared on both');
-
-    reset_state();
-    [, $page] = build($both());
-    $GLOBALS['test']['responses'] = [respond(200), respond(200, ['x-cache-manager-for-cloudpanel-policy' => 'url-ban-v1'])];
-    $result = $page->test();
-    check($result->ok() && str_contains($result->message, 'CloudPanel Varnish: ') && str_contains($result->message, 'CloudPanel Companion: '),
-        'the connection test checks both servers and says which said what');
-    $details = $page->status()['details'];
-    check($details['Cache servers'] === 'CloudPanel Varnish, CloudPanel Companion'
-        && $details['Keeps pages for'] === 'a while (CloudPanel Varnish), a while (CloudPanel Companion)',
-        'with both servers the status card lists each one and how long it keeps pages');
-    check(str_starts_with(configuration([cloudpanel(['cacheTagPrefix' => ''] + CLOUDPANEL_SETTINGS), new P\CompanionServer('shop.example.com')])->error(),
-        'CloudPanel Varnish: '), 'with both servers a problem names the server it belongs to');
+    [, $page] = build($companionSite());
+    $GLOBALS['test']['responses'] = [respond(200, ['x-cache-manager-for-cloudpanel-policy' => 'site-revision-v1'])];
+    $result = $page->clear();
+    check($result->ok() && $GLOBALS['wpdb']->row === null && array_column($GLOBALS['test']['requests'], 'url') === ['http://127.0.0.1:8081/'],
+        "with the Companion set up, clears go only to the Companion, never as tag purges its policy refuses");
+    check($page->status()['details']['Cache server'] === 'CloudPanel Companion', 'the status card names the Companion as the cache server');
+    $GLOBALS['test']['responses'] = [respond(200, ['x-cache-manager-for-cloudpanel-policy' => 'url-ban-v1'])];
+    $page->test();
+    check(($GLOBALS['test']['requests'][1]['method'] ?? '') === 'OPTIONS' && count($GLOBALS['test']['requests']) === 2,
+        'the connection test checks only the Companion');
+    check(configuration([new P\CompanionServer('shop.example.com'), cloudpanel(['cacheTagPrefix' => ''] + CLOUDPANEL_SETTINGS)])->error() === '',
+        "CloudPanel's leftover settings cannot put a Companion site's page cache in error");
 
     // Cloudflare.
     check(P\Cloudflare::zoneCandidates('shop.example.co.uk') === ['shop.example.co.uk', 'example.co.uk', 'co.uk'], 'zone candidates run from most specific to two labels');
